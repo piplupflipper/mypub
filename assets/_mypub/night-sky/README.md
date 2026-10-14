@@ -18,7 +18,7 @@ Copied on: 2026-10-14
 npx rolldown src/backgrounds/night-sky/vanilla.ts --format esm --file night-sky.js
 ```
 
-mypub にはビルド工程を置かない。
+mypub には JS のビルド工程を置かない (配信ディレクトリの組み立てだけを bin/mypub build が行う)。
 コピー元が変わったときは、同じ手順で作り直して差し替える。
 
 ## 使い方
