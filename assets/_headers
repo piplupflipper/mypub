@@ -1,0 +1,7 @@
+/*
+  X-Robots-Tag: noindex, nofollow
+
+# 版に固定した元の HTML。版番号を再利用しないので、一度作った中身は変わらない。
+# 版の外枠ページ (/<slug>/v/<n>/) には付けない。build_site が全版の外枠を作り直すことがあるため。
+/:slug/v/:n/_page
+  Cache-Control: private, max-age=31536000, immutable
