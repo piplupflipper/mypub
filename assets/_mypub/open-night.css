@@ -1,0 +1,73 @@
+/* open-night のダークテーマ。piplupflipper/components の src/foundations/open-night にある tokens.css と base.css を合わせたもの。
+   Copied from commit: 1ebae4a0d711046131f8d0822bcc704e613c2f38 (2026-10-14) */
+
+/* --- tokens.css --- */
+:root {
+    color-scheme: dark;
+
+    /* Concrete palette. Components consume the semantic --color-* aliases below. */
+    --open-night-page-bg: #090d1b;
+    --open-night-surface: rgb(15 21 42 / 86%);
+    --open-night-surface-alt: rgb(21 29 55 / 72%);
+    --open-night-surface-sunken: rgb(9 13 27 / 76%);
+    --open-night-text: #eef1fa;
+    --open-night-text-dim: #aab3cc;
+    --open-night-border: rgb(185 200 242 / 17%);
+    --open-night-accent: #b9c8f2;
+    --open-night-accent-strong: #dbe3fb;
+    --open-night-accent-ink: #090d1b;
+    --open-night-warning: #dcb15f;
+    --open-night-danger: #ff8f8f;
+    --open-night-disabled: #7f89a4;
+    --open-night-overlay: rgb(0 0 0 / 50%);
+    --open-night-radius: 6px;
+
+    /* Framework-independent semantic contract. */
+    --color-page-bg: var(--open-night-page-bg);
+    --color-bg: var(--open-night-surface);
+    --color-bg-alt: var(--open-night-surface-alt);
+    --color-bg-sunken: var(--open-night-surface-sunken);
+    --color-text: var(--open-night-text);
+    --color-text-dim: var(--open-night-text-dim);
+    --color-border: var(--open-night-border);
+    --color-accent: var(--open-night-accent);
+    --color-accent-strong: var(--open-night-accent-strong);
+    --color-accent-ink: var(--open-night-accent-ink);
+    --color-warning: var(--open-night-warning);
+    --color-danger: var(--open-night-danger);
+    --color-disabled: var(--open-night-disabled);
+    --color-overlay: var(--open-night-overlay);
+    --radius-base: var(--open-night-radius);
+}
+
+/* --- base.css --- */
+html {
+    min-width: 320px;
+    background: var(--color-page-bg);
+}
+
+body {
+    min-width: 320px;
+    margin: 0;
+    color: var(--color-text);
+    background: transparent;
+}
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+a,
+button,
+input,
+textarea,
+select {
+    outline-color: var(--color-accent);
+}
+
+::selection {
+    color: var(--color-accent-ink);
+    background: var(--color-accent);
+}

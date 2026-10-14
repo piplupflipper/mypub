@@ -1,0 +1,202 @@
+/* 外枠ページ (site/<slug>/index.html、site/<slug>/v/<n>/index.html) の見た目。上部の細いヘッダーと、元の HTML を読み込む iframe。
+   版の一覧ページ (site/<slug>/v/index.html) もヘッダーをここから借りる。
+   配色は open-night.css のトークン (ダーク専用)。一覧ページと揃える。iframe の中の元の HTML には影響しない。 */
+@import url("/_mypub/open-night.css");
+:root {
+  --bar-bg: var(--color-bg);
+  --bar-fg: var(--color-text);
+  --bar-muted: var(--color-text-dim);
+  --bar-line: var(--color-border);
+  --bar-link: var(--color-accent-strong);
+  --bar-pill: var(--color-bg-alt);
+  --pin-bg: var(--color-bg-sunken);
+  --pin-line: var(--color-warning);
+}
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bar-bg);
+  color: var(--bar-fg);
+  font: 13px/1.4 system-ui, sans-serif;
+}
+.bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--bar-line);
+  min-width: 0;
+  white-space: nowrap;
+}
+.bar a {
+  color: var(--bar-link);
+  text-decoration: none;
+}
+.bar a:hover {
+  text-decoration: underline;
+}
+.bar .home {
+  color: var(--bar-fg);
+  font-weight: 600;
+}
+.bar .sep,
+.bar time {
+  color: var(--bar-muted);
+}
+.bar time {
+  font-variant-numeric: tabular-nums;
+}
+.bar .title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bar .genre {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--bar-pill);
+  color: var(--bar-muted);
+  font-size: 12px;
+}
+/* 版番号。最新版の外枠では版の一覧へ、版の外枠でも版の一覧へリンクする。 */
+.bar .ver {
+  padding: 0 6px;
+  border: 1px solid var(--bar-line);
+  border-radius: 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.bar .here {
+  color: var(--bar-muted);
+}
+/* 版に固定した外枠ページのバナー。ヘッダーの下の 1 行。iframe は flex の残りを使うので、高さの計算は要らない。 */
+.pinned {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--pin-line);
+  background: var(--pin-bg);
+  min-width: 0;
+  white-space: nowrap;
+}
+.pinned .note {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--bar-muted);
+}
+.pinned .latest {
+  flex: none;
+  margin-left: auto;
+  color: var(--bar-link);
+}
+/* 版のセレクタ。shell.js が版番号のリンク (.ver) と置き換える。矢印は既定のまま出し、選べることを見せる。
+   幅は選んでいる版の表示に合わせ (field-sizing。未対応のブラウザでは最も長い選択肢の幅)、長い note は max-width で切る。 */
+.bar select.ver {
+  flex: none;
+  max-width: 16em;
+  field-sizing: content;
+  height: 24px;
+  padding: 0 4px;
+  border: 1px solid var(--bar-line);
+  border-radius: 6px;
+  background: var(--bar-bg);
+  color: var(--bar-fg);
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.page {
+  flex: 1 1 auto;
+  display: block;
+  width: 100%;
+  border: 0;
+}
+.noscript {
+  padding: 16px;
+}
+/* 版の一覧ページ。iframe を持たないので、本文の高さで縦に伸ばす。 */
+body.versions {
+  display: block;
+  height: auto;
+  min-height: 100%;
+}
+/* 版の一覧ページでは title を伸ばさず、「/ 版の一覧」を title のすぐ後ろに置く。 */
+body.versions .bar .title {
+  flex: 0 1 auto;
+}
+.versions-main {
+  padding: 16px 12px;
+}
+.table-wrap {
+  overflow-x: auto;
+}
+.versions-table {
+  border-collapse: collapse;
+  min-width: 100%;
+}
+.versions-table th,
+.versions-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--bar-line);
+  text-align: left;
+  vertical-align: top;
+}
+.versions-table th {
+  color: var(--bar-muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.versions-table a {
+  color: var(--bar-link);
+}
+.versions-table .n,
+.versions-table .at,
+.versions-table .from {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.versions-table tr.latest td {
+  background: var(--bar-pill);
+}
+.versions-table .mark {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--bar-link);
+  color: var(--bar-bg);
+  font-size: 11px;
+}
+/* 狭い画面では、無くても読めるものから隠す。版番号は版の一覧への入口なので残す。
+   バナーの note は隠し、「固定した URL」の文と「最新版を開く」を残す。
+   版の一覧の title 列とロールバック元の列は隠す。title はヘッダーと各版の外枠ページで、ロールバック元は note の「rollback to v<n>」で分かる。 */
+@media (max-width: 560px) {
+  .bar time,
+  .bar .genre,
+  .pinned .note,
+  .versions-table .t,
+  .versions-table .from {
+    display: none;
+  }
+  .pinned .msg {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* 狭い画面では title を残すため、版のセレクタは版番号と日付が見える程度に縮める。 */
+  .bar select.ver {
+    max-width: 10em;
+  }
+}

@@ -1,0 +1,829 @@
+#!/usr/bin/env bash
+# mypub: 自分用の HTML を記事リポジトリの pages/<slug>/ に集約し、Cloudflare Workers の static assets として公開する。
+# このファイルは本体リポジトリにあり、記事リポジトリの submodule (core/) として置いて使う。
+# 通常の公開は記事リポジトリへの push までで、デプロイは Workers Builds (Git 連携) が build.sh から `mypub build` を呼んで行う。
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+# 本体リポジトリの root。外枠ページの CSS と JS、一覧ページ、_headers は assets/ にある。
+CORE="$(cd "$(dirname "$SELF")/.." && pwd)"
+ASSETS="$CORE/assets"
+SKILL_NAME="mypub-publish"
+# 記事リポジトリの中の、記事の置き場と、配信ディレクトリの既定の出力先。
+PAGES_DIRNAME="pages"
+DEFAULT_OUT="dist"
+# 版の置き場。pages/<slug>/v/<n>/ に、その版の元の HTML と付属ファイルを置く。
+VERSIONS_DIR="v"
+# 公開した元の HTML の名前。配信ディレクトリの <slug>/index.html は、これを iframe で読み込む外枠ページになる。
+PAGE_FILE="_page.html"
+# 配信は .html を外した URL へ 307 で寄せる (static assets の html_handling の既定) ので、参照は拡張子なしで書く。
+PAGE_URL="${PAGE_FILE%.html}"
+# build が出力先に置く印。これが無い非空のディレクトリは、build の出力先と見なさず消さない。
+BUILD_MARK=".mypub-build"
+
+die() { echo "mypub: $*" >&2; exit 1; }
+info() { echo "mypub: $*" >&2; }
+
+usage() {
+  cat <<'EOF'
+usage: mypub <command> [args]
+
+  publish <file.html|dir> [slug] [--genre <名前>] [--desc <一行説明>] [--note <理由>]
+                                  記事リポジトリの pages/<slug>/ へ置き、commit して push する。中身が変われば版を 1 つ積む
+  meta <slug> [--genre <名前>] [--desc <一行説明>]
+                                  ジャンルと一行説明を変えて commit、push する。オプションが無ければ今の値を出す
+  ls                              公開済みページの一覧 (更新日 / slug / URL / ジャンル / title)
+  versions <slug>                 版の一覧 (新しい版が上。最新の印、日時、title、note、ロールバック元)
+  rollback <slug> <n> [--note <理由>]
+                                  v<n> と同じ中身の版を新しく積んで最新にし、commit して push する
+  rm <slug>                       ページを削除し、commit して push する。版もすべて消える
+  get <slug> [dest] [--version <n>]
+                                  公開済みの HTML の場所を出す。dest を渡すと公開したときの形でコピーする
+  cat <slug> [--version <n>]      公開済みの HTML を標準出力に出す
+                                  get と cat は --version を省くと最新版を使う
+  build [outdir]                  記事と本体から配信ディレクトリを組み立てる (既定は記事リポジトリの dist/)。commit はしない
+  deploy                          build してから cf で直接デプロイする (Workers Builds を待たないとき)
+  install                         コマンドと skill の symlink を $HOME 配下に張る
+
+記事リポジトリは、本体が submodule として入っている親のリポジトリ。
+submodule として入っていないときは、環境変数 MYPUB_CONTENT_DIR で指定する。
+EOF
+}
+
+# --- 記事リポジトリの場所 ---
+
+# 本体が submodule として入っているなら、その親が記事リポジトリ。
+# そうでなければ MYPUB_CONTENT_DIR を使う。どちらも無ければ止める。
+resolve_content() {
+  local super
+  if [ -n "${MYPUB_CONTENT_DIR:-}" ]; then
+    [ -d "$MYPUB_CONTENT_DIR" ] || die "MYPUB_CONTENT_DIR のディレクトリがありません: $MYPUB_CONTENT_DIR"
+    CONTENT="$(cd "$MYPUB_CONTENT_DIR" && pwd)"
+  else
+    super="$(git -C "$CORE" rev-parse --show-superproject-working-tree 2>/dev/null || true)"
+    [ -n "$super" ] || die "記事リポジトリが見つかりません。本体を記事リポジトリの submodule として置くか、環境変数 MYPUB_CONTENT_DIR で記事リポジトリを指定してください"
+    CONTENT="$super"
+  fi
+  PAGES="$CONTENT/$PAGES_DIRNAME"
+  # slug ごとのジャンル、一行説明、作成日、更新日と、版の一覧。一覧の JSON と外枠ページはここから作る。
+  PAGES_JSON="$CONTENT/pages.json"
+  BASE_URL=""
+  if [ -f "$CONTENT/mypub.conf" ]; then
+    # shellcheck source=/dev/null
+    source "$CONTENT/mypub.conf"
+  fi
+}
+
+git_() { git -C "$CONTENT" "$@"; }
+
+has_upstream() { git_ rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; }
+
+# 公開 URL は記事リポジトリの mypub.conf にある。無いか雛形のままなら URL を出さない。
+require_base_url() {
+  [ -n "$BASE_URL" ] || die "記事リポジトリの mypub.conf に BASE_URL がありません: $CONTENT/mypub.conf"
+  case "$BASE_URL" in
+    *'<'*) die "mypub.conf の BASE_URL に、Worker のカスタムドメインの URL を書いてください" ;;
+  esac
+}
+
+require_jq() {
+  command -v jq >/dev/null 2>&1 || die "jq が見つかりません。インストールしてください"
+}
+
+# pull の前提。未 commit の変更があると rebase できず、commit 済みの状態だけを
+# 公開するという前提も崩れる。
+require_clean() {
+  [ -z "$(git_ status --porcelain)" ] || die "記事リポジトリに未 commit の変更があります: $CONTENT"
+}
+
+# 記事リポジトリが記録している本体の commit と、実行中の本体の checkout が違えば止める。
+# 違ったまま publish すると、古い (または新しすぎる) 本体で記事を書き換えることになる。
+# 実行中のこのファイルを git submodule update で書き換えるのは危ないので、更新は人に任せる。
+require_core_in_sync() {
+  local rel st
+  rel="$(realpath --relative-to="$CONTENT" "$CORE")"
+  st="$(git_ submodule status -- "$rel" 2>/dev/null || true)"
+  # submodule として入っていない (MYPUB_CONTENT_DIR で指した) ときは確かめない。
+  [ -n "$st" ] || return 0
+  case "$st" in
+    [+-U]*) die "記事リポジトリが記録している本体の commit と $rel/ の checkout が違います。cd '$CONTENT' && git submodule update --init を実行してから、やり直してください" ;;
+  esac
+}
+
+sync_from_remote() {
+  if has_upstream; then
+    git_ pull --rebase --quiet || die "git pull --rebase に失敗しました"
+  fi
+  require_core_in_sync
+}
+
+# 読み取り系の前処理。未 commit の変更があると pull できないので、手元の内容で続ける。
+refresh_content() {
+  if [ -n "$(git_ status --porcelain)" ]; then
+    info "記事リポジトリに未 commit の変更があるので pull せず、手元の内容を使います"
+    return
+  fi
+  sync_from_remote
+}
+
+push_to_remote() {
+  if has_upstream; then
+    git_ push --quiet || die "git push に失敗しました (commit は手元に残っています)"
+  else
+    info "upstream が無いので push を省略しました"
+  fi
+}
+
+valid_slug() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]*$ ]]; }
+
+# ジャンルと一行説明は 1 行のテキストに限る。改行とタブは ls の出力を崩す。
+valid_text() { [[ "$1" != *$'\n'* && "$1" != *$'\t'* ]]; }
+
+list_slugs() {
+  local d
+  for d in "$PAGES"/*/; do
+    [ -f "${d}$PAGE_FILE" ] && basename "$d"
+  done
+  return 0
+}
+
+page_path() { echo "$PAGES/$1/$PAGE_FILE"; }
+
+require_page() {
+  [ -f "$(page_path "$1")" ] || die "公開されていません: $1"
+}
+
+version_dir() { echo "$PAGES/$1/$VERSIONS_DIR/$2"; }
+
+valid_version() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
+
+# 版のディレクトリに元の HTML があることを確かめる。pages.json ではなく実体を見る。
+require_version() {
+  [ -f "$(version_dir "$1" "$2")/$PAGE_FILE" ] || die "v$2 はありません: $1 (版の一覧は mypub versions $1)"
+}
+
+# <title> の中身を、HTML の文字参照を戻したテキストで返す。
+page_title() {
+  local title
+  title="$(tr '\n' ' ' <"$1" | grep -oiE '<title[^>]*>[^<]*' | head -n 1 | sed 's/<[^>]*>//' || true)"
+  title="$(echo "$title" | sed 's/^ *//; s/ *$//' | sed "s/&lt;/</g; s/&gt;/>/g; s/&quot;/\"/g; s/&#39;/'/g; s/&amp;/\\&/g")"
+  echo "${title:-(no title)}"
+}
+
+html_escape() {
+  sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g' <<<"$1"
+}
+
+# --- pages.json ---
+
+pages_read() {
+  if [ -f "$PAGES_JSON" ]; then
+    cat "$PAGES_JSON"
+  else
+    echo '{}'
+  fi
+}
+
+# jq のフィルタで pages.json を書き換える。キーを並べ替えて差分を安定させる。
+pages_update() {
+  local tmp
+  tmp="$(mktemp)"
+  pages_read | jq -S "$@" >"$tmp" || { rm -f "$tmp"; die "pages.json を更新できませんでした"; }
+  mv "$tmp" "$PAGES_JSON"
+}
+
+# pages/ と pages.json の整合を確かめる。build は記事リポジトリを書き換えないので、直す代わりに止める。
+# publish、rollback、rm が両方を一緒に更新するので、通常は食い違わない。
+check_pages() {
+  local slug
+  for slug in $(list_slugs); do
+    valid_slug "$slug" || die "pages/$slug の名前は slug として使えません (英小文字、数字、ハイフン)"
+    pages_read | jq -e --arg s "$slug" '.[$s].versions != null and .[$s].latest != null' >/dev/null \
+      || die "pages.json に $slug の版の記録がありません。mypub publish で登録してください"
+  done
+  for slug in $(pages_read | jq -r 'keys[]'); do
+    [ -f "$(page_path "$slug")" ] || die "pages.json にある $slug が pages/ にありません"
+  done
+}
+
+# --- 外枠ページと一覧の JSON ---
+
+# 外枠ページを $1 に書く。上部のヘッダーと、元の HTML を読み込む iframe だけを持つ。
+# 見た目と振る舞いは assets/_mypub/ の CSS と JS が持つので、ここは中身の差し込みだけにする。
+# $2 は title (エスケープ前)、$3 は title の後ろに並べるヘッダーの HTML、$4 はヘッダーの下に出すバナーの HTML。
+shell_html() {
+  local out="$1" title meta_html="$3" banner_line=""
+  title="$(html_escape "$2")"
+  # バナーが無い外枠ページに空行を残さない。
+  [ -n "$4" ] && banner_line="$4"$'\n'
+  cat >"$out" <<EOF
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>$title</title>
+<link rel="stylesheet" href="/_mypub/shell.css">
+<script>if (window.top !== window.self) location.replace("./$PAGE_URL" + location.hash);</script>
+</head>
+<body>
+<header class="bar">
+<a class="home" href="/">mypub</a>
+<span class="sep" aria-hidden="true">/</span>
+<span class="title">$title</span>
+$meta_html
+<a class="raw" href="./$PAGE_URL" target="_blank" rel="noopener">元のページ ↗</a>
+</header>
+$banner_line<iframe class="page" title="$title" data-src="./$PAGE_URL"></iframe>
+<noscript><p class="noscript"><a href="./$PAGE_URL">元のページを開く</a></p></noscript>
+<script src="/_mypub/shell.js"></script>
+</body>
+</html>
+EOF
+}
+
+# 最新版の外枠ページ (<out>/<slug>/index.html)。
+# 版が 2 つ以上あれば、更新日の隣に最新の版番号を出し、版の一覧ページへリンクする。
+write_shell() {
+  local slug="$1" title="$2" genre updated latest="$5" count="$6" meta_html=""
+  genre="$(html_escape "$3")"
+  updated="$4"
+  [ -n "$genre" ] && meta_html="<span class=\"genre\">$genre</span>"$'\n'
+  meta_html+="<time datetime=\"$updated\">$updated</time>"
+  if [ "$count" -gt 1 ]; then
+    meta_html+=$'\n'"<a class=\"ver\" href=\"./$VERSIONS_DIR/\" title=\"版の一覧\">v$latest</a>"
+  fi
+  shell_html "$OUT/$slug/index.html" "$title" "$meta_html" ""
+}
+
+# 版に固定した外枠ページ (<out>/<slug>/v/<n>/index.html)。
+# 中身はその版の番号、日時、title、note だけで決め、最新の版番号や他の版の情報は書かない。
+# 書くと publish のたびに全版の外枠ページが書き換わり、「作った後に変わらない」が崩れる。
+# バナーに「過去版」と書かないのは、/<slug>/v/<latest>/ を開いたときに誤りになるから。
+write_version_shell() {
+  local slug="$1" n="$2" at="$3" title="$4" note="$5" day meta_html banner_html note_html=""
+  day="${at:0:10}"
+  meta_html="<time datetime=\"$(html_escape "$at")\">$day</time>"$'\n'
+  meta_html+="<a class=\"ver\" href=\"../\" title=\"版の一覧\">v$n</a>"
+  [ -n "$note" ] && note_html="<span class=\"note\">$(html_escape "$note")</span>"
+  banner_html="<p class=\"pinned\"><span class=\"msg\">v$n ($day) に固定した URL を開いています。</span>"
+  banner_html+="$note_html<a class=\"latest\" href=\"../../\">最新版を開く</a></p>"
+  shell_html "$OUT/$slug/$VERSIONS_DIR/$n/index.html" "$title" "$meta_html" "$banner_html"
+}
+
+# 版の一覧ページ (<out>/<slug>/v/index.html)。pages.json の versions から静的に作る。
+# pages.json は配信されないので、JS で読みに行く形にはしない。
+write_versions_page() {
+  local slug="$1" title rows
+  title="$(html_escape "$2")"
+  # 新しい版が上。日時は「YYYY-MM-DD HH:MM」で出し、datetime に元の値を残す。
+  rows="$(pages_read | jq -r --arg s "$slug" '
+    .[$s] as $p
+    | $p.versions | sort_by(.n) | reverse | .[]
+    | "<tr\(if .n == $p.latest then " class=\"latest\"" else "" end)>"
+      + "<td class=\"n\"><a href=\"./\(.n)/\">v\(.n)</a>"
+      + (if .n == $p.latest then " <span class=\"mark\">最新</span>" else "" end) + "</td>"
+      + "<td class=\"at\"><time datetime=\"\(.at | @html)\">\(.at[0:10] + " " + .at[11:16] | @html)</time></td>"
+      + "<td class=\"t\">\(.title | @html)</td>"
+      + "<td class=\"note\">\(.note // "" | @html)</td>"
+      + "<td class=\"from\">\(if .from then "<a href=\"./\(.from)/\">v\(.from)</a>" else "" end)</td>"
+      + "</tr>"')"
+  cat >"$OUT/$slug/$VERSIONS_DIR/index.html" <<EOF
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>版の一覧: $title</title>
+<link rel="stylesheet" href="/_mypub/shell.css">
+</head>
+<body class="versions">
+<header class="bar">
+<a class="home" href="/">mypub</a>
+<span class="sep" aria-hidden="true">/</span>
+<a class="title" href="../">$title</a>
+<span class="sep" aria-hidden="true">/</span>
+<span class="here">版の一覧</span>
+</header>
+<main class="versions-main">
+<div class="table-wrap">
+<table class="versions-table">
+<thead><tr><th class="n">版</th><th class="at">日時</th><th class="t">title</th><th class="note">note</th><th class="from">ロールバック元</th></tr></thead>
+<tbody>
+$rows
+</tbody>
+</table>
+</div>
+</main>
+</body>
+</html>
+EOF
+}
+
+# 版の一覧の JSON (<out>/<slug>/v/index.json)。shell.js が読み、ヘッダーの版のセレクタを組み立てる。
+# 版の外枠ページに一覧を埋め込まず JSON に分けるのは、publish のたびに全版の外枠ページを書き換えないため。
+# v/ の直下に置くので、版のディレクトリ (v/<n>/) の中身とは混ざらない。
+write_versions_json() {
+  local slug="$1"
+  # 新しい版が上。キーの順を固定し、ロールバック元 (from) が無い版では from を省く。
+  pages_read | jq --arg s "$slug" '
+    .[$s] as $p
+    | {latest: $p.latest,
+       versions: [$p.versions | sort_by(.n) | reverse | .[]
+         | {n, at, title, note: (.note // ""), from} | del(.from | select(. == null))]}' \
+    >"$OUT/$slug/$VERSIONS_DIR/index.json"
+}
+
+# 1 つの slug を配信ディレクトリに置く。元の HTML と付属ファイルと全版をコピーし、
+# 外枠ページ (最新版と全版)、版の一覧ページ、版の一覧の JSON を作る。
+write_slug_pages() {
+  local slug="$1" title="$2" p n at vtitle note
+  cp -R "$PAGES/$slug" "$OUT/$slug"
+  p="$(pages_read | jq -c --arg s "$slug" '.[$s]')"
+  write_shell "$slug" "$title" "$(jq -r '.genre' <<<"$p")" "$(jq -r '.updated' <<<"$p")" \
+    "$(jq -r '.latest' <<<"$p")" "$(jq -r '.versions | length' <<<"$p")"
+  # 区切りは US。title と note は 1 行のテキストなので、改行で版を区切れる。
+  while IFS="$US" read -r n at vtitle note; do
+    if [ ! -d "$OUT/$slug/$VERSIONS_DIR/$n" ]; then
+      info "pages/$slug/$VERSIONS_DIR/$n がありません。外枠ページを作りません"
+      continue
+    fi
+    write_version_shell "$slug" "$n" "$at" "$vtitle" "$note"
+  done < <(jq -r '.versions[] | [(.n | tostring), .at, .title, (.note // "")] | join("\u001f")' <<<"$p")
+  mkdir -p "$OUT/$slug/$VERSIONS_DIR"
+  write_versions_page "$slug" "$title"
+  write_versions_json "$slug"
+}
+
+# 出力は「更新日 US slug US ジャンル US title」で、更新日の新しい順。
+# 区切りはタブでなく US (0x1f) にする。タブは read で空の欄が詰められてしまう。
+US=$'\x1f'
+page_rows() {
+  local slug
+  list_slugs | while read -r slug; do
+    pages_read | jq -r --arg s "$slug" --arg t "$(page_title "$(page_path "$slug")")" \
+      '[(.[$s].updated // ""), $s, (.[$s].genre // ""), $t] | join("\u001f")'
+  done | sort -t "$US" -k1,1r -k2,2
+}
+
+# 配信ディレクトリ $OUT を組み立てる。assets/ (外枠の CSS と JS、一覧ページ、_headers)、
+# 全ページの元の HTML と版、外枠ページ、版の一覧ページと JSON、一覧の index.json。
+build_site() {
+  local slug title titles='{}'
+  check_pages
+  cp -R "$ASSETS"/. "$OUT"/
+  for slug in $(list_slugs); do
+    title="$(page_title "$(page_path "$slug")")"
+    titles="$(jq --arg s "$slug" --arg t "$title" '.[$s] = $t' <<<"$titles")"
+    write_slug_pages "$slug" "$title"
+  done
+  # updated の新しい順、同じ日は slug の順。sort_by は安定なので 2 回に分けて並べる。
+  pages_read | jq --argjson t "$titles" '
+    [to_entries[] | {slug: .key, title: $t[.key], genre: .value.genre, desc: .value.desc,
+      created: .value.created, updated: .value.updated, latest: .value.latest}]
+    | sort_by(.slug) | reverse | sort_by(.updated) | reverse' >"$OUT/index.json"
+  : >"$OUT/$BUILD_MARK"
+}
+
+# 記事の元と pages.json だけを commit する。配信ディレクトリは commit しない (ビルド時に作る)。
+commit_content() {
+  git_ add -A "$PAGES_DIRNAME" pages.json
+  if git_ diff --cached --quiet; then
+    return 1
+  fi
+  git_ commit --quiet -m "$1"
+}
+
+default_slug() {
+  local src="$1" name
+  if [ -d "$src" ]; then
+    name="$(basename "$(cd "$src" && pwd)")"
+  else
+    name="$(basename "$src")"
+    name="${name%.*}"
+    if [ "$name" = "index" ]; then
+      name="$(basename "$(cd "$(dirname "$src")" && pwd)")"
+    fi
+  fi
+  echo "$name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//'
+}
+
+# --genre、--desc、--note を取り出し、残りの引数を POSITIONAL に入れる。
+# --note は publish と rollback が使う。meta では呼び出し側で拒否する。
+parse_meta_opts() {
+  POSITIONAL=()
+  HAS_GENRE=0 HAS_DESC=0 HAS_NOTE=0 OPT_GENRE="" OPT_DESC="" OPT_NOTE=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --genre)
+        [ $# -ge 2 ] || die "--genre に値がありません"
+        HAS_GENRE=1 OPT_GENRE="$2"
+        shift 2
+        ;;
+      --desc)
+        [ $# -ge 2 ] || die "--desc に値がありません"
+        HAS_DESC=1 OPT_DESC="$2"
+        shift 2
+        ;;
+      --note)
+        [ $# -ge 2 ] || die "--note に値がありません"
+        HAS_NOTE=1 OPT_NOTE="$2"
+        shift 2
+        ;;
+      --)
+        shift
+        POSITIONAL+=("$@")
+        break
+        ;;
+      -?*) die "不明なオプションです: $1" ;;
+      *)
+        POSITIONAL+=("$1")
+        shift
+        ;;
+    esac
+  done
+  valid_text "$OPT_GENRE" || die "--genre に改行やタブは使えません"
+  valid_text "$OPT_DESC" || die "--desc に改行やタブは使えません"
+  valid_text "$OPT_NOTE" || die "--note に改行やタブは使えません"
+}
+
+# 新しい中身 ($1) が、版のディレクトリ ($2) と同じなら真を返す。
+same_content() {
+  local stage="$1" vdir="$2"
+  [ -d "$vdir" ] || return 1
+  diff -rq -- "$stage" "$vdir" >/dev/null 2>&1
+}
+
+# 版の中身 ($1) を $2 にコピーする。
+copy_page_content() {
+  local src="$1" dest="$2"
+  mkdir -p "$dest"
+  find "$src" -mindepth 1 -maxdepth 1 -exec cp -R {} "$dest"/ \;
+}
+
+# pages/<slug>/ 直下の最新版の写しを $2 の中身に入れ替える。v/ は残す。
+replace_latest_copy() {
+  local dest="$PAGES/$1" src="$2"
+  mkdir -p "$dest"
+  find "$dest" -mindepth 1 -maxdepth 1 ! -name "$VERSIONS_DIR" -exec rm -rf {} +
+  copy_page_content "$src" "$dest"
+}
+
+# --version <n> を取り出し、残りの引数を POSITIONAL に入れる。get と cat が使う。
+# 書き込みをしないコマンドなので、--genre などの publish 向けのオプションとは分けておく。
+parse_version_opt() {
+  POSITIONAL=()
+  OPT_VERSION=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --version)
+        [ $# -ge 2 ] || die "--version に値がありません"
+        OPT_VERSION="$2"
+        shift 2
+        ;;
+      --)
+        shift
+        POSITIONAL+=("$@")
+        break
+        ;;
+      -?*) die "不明なオプションです: $1" ;;
+      *)
+        POSITIONAL+=("$1")
+        shift
+        ;;
+    esac
+  done
+  [ -z "$OPT_VERSION" ] || valid_version "$OPT_VERSION" || die "--version には 1 以上の整数を指定してください: '$OPT_VERSION'"
+}
+
+# 指定があったジャンルと一行説明を pages.json に書く。
+apply_meta_opts() {
+  local slug="$1"
+  if [ "$HAS_GENRE" = 1 ]; then
+    pages_update --arg s "$slug" --arg v "$OPT_GENRE" '.[$s].genre = $v'
+  fi
+  if [ "$HAS_DESC" = 1 ]; then
+    pages_update --arg s "$slug" --arg v "$OPT_DESC" '.[$s].desc = $v'
+  fi
+}
+
+cmd_publish() {
+  parse_meta_opts "$@"
+  set -- "${POSITIONAL[@]}"
+  [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: mypub publish <file.html|dir> [slug] [--genre <名前>] [--desc <一行説明>] [--note <理由>]"
+  local src="$1" slug="${2:-}"
+  [ -e "$src" ] || die "見つかりません: $src"
+  if [ -d "$src" ]; then
+    [ -f "$src/index.html" ] || die "ディレクトリに index.html がありません: $src"
+    [ ! -e "$src/$PAGE_FILE" ] || die "$PAGE_FILE は mypub が使う名前なので、ディレクトリに置けません: $src"
+    [ ! -e "$src/$VERSIONS_DIR" ] && [ ! -L "$src/$VERSIONS_DIR" ] \
+      || die "$VERSIONS_DIR は mypub が版の置き場に使う名前なので、ディレクトリの直下に置けません: $src"
+    src="$(cd "$src" && pwd)"
+  else
+    src="$(cd "$(dirname "$src")" && pwd)/$(basename "$src")"
+  fi
+  [ -n "$slug" ] || slug="$(default_slug "$src")"
+  valid_slug "$slug" || die "slug は英小文字、数字、ハイフンで指定してください: '$slug'"
+
+  require_base_url
+  require_jq
+  require_clean
+  sync_from_remote
+
+  local dest="$PAGES/$slug" verb="publish" today at stage latest seq n="" msg
+  [ -d "$dest" ] && verb="update"
+
+  # 新しい中身を一度よそに組み立て、最新版と比べてから pages/<slug>/ に置く。
+  stage="$(mktemp -d)"
+  # shellcheck disable=SC2064 # stage はここで値を固定したい
+  trap "rm -rf '$stage'" EXIT
+  if [ -d "$src" ]; then
+    cp -R "$src"/. "$stage"/
+    mv "$stage/index.html" "$stage/$PAGE_FILE"
+  else
+    cp "$src" "$stage/$PAGE_FILE"
+  fi
+
+  today="$(date +%F)"
+  pages_update --arg s "$slug" --arg d "$today" \
+    '.[$s] |= ((. // {}) | .genre //= "" | .desc //= "" | .created //= $d | .updated //= $d | .seq //= 0 | .versions //= [])'
+  latest="$(pages_read | jq -r --arg s "$slug" '.[$s].latest // empty')"
+  seq="$(pages_read | jq -r --arg s "$slug" '.[$s].seq')"
+
+  # 中身が最新版と同じなら版を作らない。版番号は seq の次から採り、再利用しない。
+  if [ -n "$latest" ] && same_content "$stage" "$dest/$VERSIONS_DIR/$latest"; then
+    info "中身が最新版 (v$latest) と同じなので、版を作りません"
+  else
+    n=$((seq + 1))
+    [ ! -e "$dest/$VERSIONS_DIR/$n" ] || die "pages/$slug/$VERSIONS_DIR/$n が既にあります。pages.json の seq と食い違っています"
+    mkdir -p "$dest/$VERSIONS_DIR/$n"
+    cp -R "$stage"/. "$dest/$VERSIONS_DIR/$n"/
+    at="$(date -Is)"
+    pages_update --arg s "$slug" --argjson n "$n" --arg at "$at" --arg d "$today" \
+      --arg t "$(page_title "$stage/$PAGE_FILE")" --arg note "$OPT_NOTE" \
+      '.[$s] |= (.latest = $n | .seq = $n | .updated = $d
+        | .versions += [{n: $n, at: $at, title: $t, note: $note}])'
+  fi
+
+  replace_latest_copy "$slug" "$stage"
+  apply_meta_opts "$slug"
+
+  msg="$verb: $slug"
+  [ -n "$n" ] && msg="$msg (v$n)"
+  if commit_content "$msg"; then
+    push_to_remote
+  else
+    info "内容が変わっていないため commit しませんでした"
+  fi
+  echo "$BASE_URL/$slug/"
+}
+
+cmd_meta() {
+  parse_meta_opts "$@"
+  set -- "${POSITIONAL[@]}"
+  [ $# -eq 1 ] || die "usage: mypub meta <slug> [--genre <名前>] [--desc <一行説明>]"
+  [ "$HAS_NOTE" = 0 ] || die "--note は publish と rollback でだけ使えます"
+  local slug="$1"
+  valid_slug "$slug" || die "slug が不正です: '$slug'"
+  require_jq
+  if [ "$HAS_GENRE" = 0 ] && [ "$HAS_DESC" = 0 ]; then
+    refresh_content
+    require_page "$slug"
+    pages_read | jq --arg s "$slug" '.[$s]'
+    return
+  fi
+  require_clean
+  sync_from_remote
+  require_page "$slug"
+  apply_meta_opts "$slug"
+  if commit_content "meta: $slug"; then
+    push_to_remote
+  else
+    info "値が変わっていないため commit しませんでした"
+  fi
+  pages_read | jq --arg s "$slug" '.[$s]'
+}
+
+cmd_ls() {
+  require_base_url
+  require_jq
+  page_rows | while IFS="$US" read -r date slug genre title; do
+    printf '%s\t%s\t%s\t%s\t%s\n' "$date" "$slug" "$BASE_URL/$slug/" "$genre" "$title"
+  done
+}
+
+cmd_rm() {
+  [ $# -eq 1 ] || die "usage: mypub rm <slug>"
+  local slug="$1"
+  valid_slug "$slug" || die "slug が不正です: '$slug'"
+  require_jq
+  require_clean
+  sync_from_remote
+  [ -d "$PAGES/$slug" ] || die "公開されていません: $slug"
+  rm -rf "${PAGES:?}/$slug"
+  pages_update --arg s "$slug" 'del(.[$s])'
+  commit_content "remove: $slug" || die "削除する変更がありませんでした"
+  push_to_remote
+  info "削除しました: $slug"
+}
+
+# 版の一覧を、新しい版が上の順に出す。ls と同じく、人が読むためのタブ区切りにする。
+cmd_versions() {
+  [ $# -eq 1 ] || die "usage: mypub versions <slug>"
+  local slug="$1"
+  valid_slug "$slug" || die "slug が不正です: '$slug'"
+  require_jq
+  refresh_content
+  require_page "$slug"
+  if ! pages_read | jq -e --arg s "$slug" '.[$s].versions != null' >/dev/null; then
+    die "版の記録がありません: $slug"
+  fi
+  pages_read | jq -r --arg s "$slug" '
+    .[$s] as $p
+    | $p.versions | sort_by(.n) | reverse | .[]
+    | [ "v\(.n)" + (if .n == $p.latest then " (最新)" else "" end),
+        (.at[0:10] + " " + .at[11:16]),
+        .title,
+        (.note // ""),
+        (if .from then "<- v\(.from)" else "" end) ]
+    | join("\t") | sub("\t+$"; "")'
+}
+
+# v<n> と同じ中身の版を v<seq+1> として積み、最新にする。latest を戻さないのは、
+# 版番号の順と時刻の順と commit の順を一致させるため (htmlpub のロールバックと同じ)。
+cmd_rollback() {
+  parse_meta_opts "$@"
+  set -- "${POSITIONAL[@]}"
+  [ $# -eq 2 ] || die "usage: mypub rollback <slug> <n> [--note <理由>]"
+  [ "$HAS_GENRE" = 0 ] && [ "$HAS_DESC" = 0 ] || die "rollback では --genre と --desc を使えません。mypub meta で変えてください"
+  local slug="$1" n="$2"
+  valid_slug "$slug" || die "slug が不正です: '$slug'"
+  valid_version "$n" || die "版番号は 1 以上の整数で指定してください: '$n'"
+
+  require_base_url
+  require_jq
+  require_clean
+  sync_from_remote
+  require_page "$slug"
+
+  local p latest seq new title note at today vdir stage
+  p="$(pages_read | jq -c --arg s "$slug" '.[$s] // {}')"
+  [ "$(jq -r '.versions != null' <<<"$p")" = true ] || die "版の記録がありません: $slug"
+  latest="$(jq -r '.latest' <<<"$p")"
+  seq="$(jq -r '.seq' <<<"$p")"
+  jq -e --argjson n "$n" 'any(.versions[]; .n == $n)' <<<"$p" >/dev/null \
+    || die "v$n はありません: $slug (版の一覧は mypub versions $slug)"
+  [ "$n" != "$latest" ] || die "v$n は既に最新です: $slug"
+  vdir="$(version_dir "$slug" "$n")"
+  require_version "$slug" "$n"
+
+  # 中身をよそに組み立て、最新版と比べてから置く。publish と同じ手順。
+  stage="$(mktemp -d)"
+  # shellcheck disable=SC2064 # stage はここで値を固定したい
+  trap "rm -rf '$stage'" EXIT
+  copy_page_content "$vdir" "$stage"
+  # 中身が最新版と同じなら、積んでも同じ版が並ぶだけなので作らない。publish と同じ扱い。
+  if same_content "$stage" "$(version_dir "$slug" "$latest")"; then
+    die "v$n の中身は最新版 (v$latest) と同じなので、版を作りません"
+  fi
+
+  new=$((seq + 1))
+  [ ! -e "$(version_dir "$slug" "$new")" ] || die "pages/$slug/$VERSIONS_DIR/$new が既にあります。pages.json の seq と食い違っています"
+  copy_page_content "$stage" "$(version_dir "$slug" "$new")"
+  replace_latest_copy "$slug" "$stage"
+
+  title="$(jq -r --argjson n "$n" '.versions[] | select(.n == $n) | .title' <<<"$p")"
+  note="rollback to v$n"
+  [ "$HAS_NOTE" = 1 ] && note="$OPT_NOTE"
+  at="$(date -Is)"
+  today="$(date +%F)"
+  pages_update --arg s "$slug" --argjson new "$new" --argjson from "$n" --arg at "$at" --arg d "$today" \
+    --arg t "$title" --arg note "$note" \
+    '.[$s] |= (.latest = $new | .seq = $new | .updated = $d
+      | .versions += [{n: $new, at: $at, title: $t, note: $note, from: $from}])'
+
+  commit_content "rollback: $slug v$n -> v$new" || die "commit する変更がありませんでした"
+  push_to_remote
+  info "v$n を v$new として最新にしました: $slug"
+  echo "$BASE_URL/$slug/"
+}
+
+cmd_get() {
+  parse_version_opt "$@"
+  set -- "${POSITIONAL[@]}"
+  [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: mypub get <slug> [dest] [--version <n>]"
+  local slug="$1" dest="${2:-}" src
+  valid_slug "$slug" || die "slug が不正です: '$slug'"
+  refresh_content
+  require_page "$slug"
+  src="$PAGES/$slug"
+  if [ -n "$OPT_VERSION" ]; then
+    require_version "$slug" "$OPT_VERSION"
+    src="$(version_dir "$slug" "$OPT_VERSION")"
+  fi
+  if [ -z "$dest" ]; then
+    echo "$src/$PAGE_FILE"
+    return
+  fi
+  # 版の置き場を除き、元の HTML を index.html に戻す。publish に渡したときの形になる。
+  # 版のディレクトリには v/ が無いので、除外の指定はどちらから取り出すときも同じでよい。
+  mkdir -p "$dest"
+  dest="$(cd "$dest" && pwd)"
+  find "$src" -mindepth 1 -maxdepth 1 ! -name "$VERSIONS_DIR" -exec cp -R {} "$dest"/ \;
+  mv "$dest/$PAGE_FILE" "$dest/index.html"
+  info "コピーしました: $dest"
+}
+
+cmd_cat() {
+  parse_version_opt "$@"
+  set -- "${POSITIONAL[@]}"
+  [ $# -eq 1 ] || die "usage: mypub cat <slug> [--version <n>]"
+  local slug="$1"
+  valid_slug "$slug" || die "slug が不正です: '$slug'"
+  refresh_content
+  require_page "$slug"
+  if [ -n "$OPT_VERSION" ]; then
+    require_version "$slug" "$OPT_VERSION"
+    cat "$(version_dir "$slug" "$OPT_VERSION")/$PAGE_FILE"
+    return
+  fi
+  cat "$(page_path "$slug")"
+}
+
+# 配信ディレクトリを $1 (既定は記事リポジトリの dist/) に組み立てる。
+# 記事リポジトリは読むだけで書き換えない。Workers Builds の build.sh と、deploy がこれを呼ぶ。
+cmd_build() {
+  [ $# -le 1 ] || die "usage: mypub build [outdir]"
+  local out="${1:-$CONTENT/$DEFAULT_OUT}"
+  require_jq
+  mkdir -p "$out"
+  OUT="$(cd "$out" && pwd)"
+  case "$OUT" in
+    "$CONTENT" | "$PAGES" | "$PAGES"/* | "$CORE" | "$CORE"/* | "$HOME" | /) die "出力先に使えません: $OUT" ;;
+  esac
+  # 前の build の残りを配信しないよう空にする。印の無い非空のディレクトリは、別の用途のものとして消さない。
+  if [ -n "$(ls -A "$OUT")" ] && [ ! -e "$OUT/$BUILD_MARK" ]; then
+    die "出力先が空でなく、mypub build の出力でもありません: $OUT"
+  fi
+  find "$OUT" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+  build_site
+  info "書き出しました: $OUT"
+}
+
+cmd_deploy() {
+  [ $# -eq 0 ] || die "usage: mypub deploy"
+  require_clean
+  sync_from_remote
+  if has_upstream && [ -n "$(git_ log '@{u}..' --oneline)" ]; then
+    die "push していない commit があります。リポジトリと配信内容がずれるので、先に push してください"
+  fi
+  [ -x "$CONTENT/node_modules/.bin/cf" ] || die "cf が入っていません。記事リポジトリで npm ci を実行してください: $CONTENT"
+  cmd_build "$CONTENT/$DEFAULT_OUT"
+  cd "$CONTENT"
+  # Worker の名前と assets のディレクトリは、記事リポジトリの cloudflare.config.ts と wrangler.config.ts から読まれる。
+  local runner=(npx --no-install cf)
+  command -v mise >/dev/null 2>&1 && runner=(mise exec -- npx --no-install cf)
+  "${runner[@]}" deploy
+}
+
+link_into() {
+  local target="$1" link="$2"
+  mkdir -p "$(dirname "$link")"
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    die "symlink でない既存のファイルがあります: $link"
+  fi
+  ln -sfn "$target" "$link"
+  info "$link -> $target"
+}
+
+cmd_install() {
+  link_into "$CORE/bin/mypub" "$HOME/.local/bin/mypub"
+  link_into "$CORE/skills/$SKILL_NAME" "$HOME/.claude/skills/$SKILL_NAME"
+}
+
+main() {
+  local cmd="${1:-}"
+  [ $# -gt 0 ] && shift
+  case "$cmd" in
+    -h | --help | help | "") usage; return ;;
+    install) cmd_install "$@"; return ;;
+  esac
+  resolve_content
+  case "$cmd" in
+    publish) cmd_publish "$@" ;;
+    meta) cmd_meta "$@" ;;
+    ls) cmd_ls "$@" ;;
+    versions) cmd_versions "$@" ;;
+    rollback) cmd_rollback "$@" ;;
+    rm) cmd_rm "$@" ;;
+    get) cmd_get "$@" ;;
+    cat) cmd_cat "$@" ;;
+    build) cmd_build "$@" ;;
+    deploy) cmd_deploy "$@" ;;
+    *) usage >&2; exit 1 ;;
+  esac
+}
+
+main "$@"
