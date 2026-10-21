@@ -9,6 +9,7 @@
   一覧ページ。中身は bin/mypub が書き出す index.json から JS で組み立てる。
   このファイル自体は bin/mypub が書き換えない。
   既定は非推奨 (index.json の deprecated: true) でないページの一覧で、?view=graveyard では非推奨のページだけを出す (墓場)。
+  サムネの iframe は表示するカードにだけ置き、版に固定した /<slug>/v/<latest>/_page (_headers で immutable) を読む。隠すカードからは外す。
   配色は _mypub/open-night.css のトークン、背景は _mypub/night-sky/ の夜空。どちらもダーク専用。
 -->
 <link rel="stylesheet" href="/_mypub/open-night.css">
@@ -158,10 +159,12 @@ h1 { font-size: 20px; margin: 0; }
     );
   };
 
+  // サムネの iframe。カードを表示するときに作り、隠すときに外す (render)。
+  // 版に固定した URL は _headers で immutable のキャッシュが付くので、作り直しても再検証のリクエストが出ない。
+  const thumbFrame = (p) => el("iframe", { src: `./${p.slug}/v/${p.latest}/_page`, loading: "lazy", tabIndex: -1, title: "" });
+
   const card = (p) => {
-    const thumb = el("div", { className: "thumb" }, [
-      el("iframe", { src: `./${p.slug}/_page`, loading: "lazy", tabIndex: -1, title: "" }),
-    ]);
+    const thumb = el("div", { className: "thumb" });
     // サムネは見た目だけのもの。中のリンクやフォーカスに触れないようにする。
     thumb.inert = true;
     thumb.setAttribute("aria-hidden", "true");
@@ -206,18 +209,27 @@ h1 { font-size: 20px; margin: 0; }
     if (viewPages.length > 0) status.textContent = "条件に合うページはありません。";
     else status.textContent = state.view === GRAVEYARD ? "非推奨のページはありません。" : "公開済みのページはありません。";
     // カードは最初に 1 度だけ作り、絞り込みは hidden で切り替える。
-    // iframe は DOM から外すと読み込み直しになるので、並び順が変わったカードだけを動かす。
-    // moveBefore (状態を保ったまま動かす) が無いブラウザでは、動かしたサムネだけ読み込み直しになる。
+    // 隠したカードに読み込み済みの iframe を残すと、表示に戻すときに iframe の中の文書の再レイアウトで描画が止まる (issue #9)。
+    // そこで隠すカードからは iframe を外し、表示するカードのうち iframe の無いものにだけ作る。
+    // 表示したままのカードの iframe には触れないので、検索で文字を打つたびに読み込み直すことはない。
+    // 並び順が変わったカードだけを動かす。iframe を外してから動かし、動かしてから作るので、隠すカードと新たに出すカードはどう動かしても読み込みは増えない。
+    // 表示したまま並び順だけ変わるカード (並び替え、絞り込み) は、moveBefore なら iframe の状態を保って動かせる。
+    // moveBefore が無いブラウザでは、そのカードのサムネが読み込み直しになる (immutable のキャッシュから返る)。
     const list = $("list");
     const visible = new Set(shown.map((p) => p.slug));
     const order = [...shown, ...pages.filter((p) => !visible.has(p.slug))];
     order.forEach((p, i) => {
       const li = cards.get(p.slug);
-      li.hidden = !visible.has(p.slug);
+      const show = visible.has(p.slug);
+      const thumb = li.querySelector(".thumb");
+      li.hidden = !show;
+      if (!show) thumb.replaceChildren();
       const at = list.children[i] || null;
-      if (li === at) return;
-      if (list.moveBefore && li.isConnected) list.moveBefore(li, at);
-      else list.insertBefore(li, at);
+      if (li !== at) {
+        if (list.moveBefore && li.isConnected) list.moveBefore(li, at);
+        else list.insertBefore(li, at);
+      }
+      if (show && !thumb.firstChild) thumb.append(thumbFrame(p));
     });
     saveState();
   };
@@ -228,7 +240,7 @@ h1 { font-size: 20px; margin: 0; }
   state.sort = $("sort").value;
   $("q").addEventListener("input", (e) => { state.q = e.target.value; render(); });
   $("sort").addEventListener("change", (e) => { state.sort = e.target.value; render(); });
-  // 一覧と墓場の切り替えは読み込み直さずに行う。サムネの iframe を読み込み直さないため。
+  // 一覧と墓場の切り替えはページを読み込み直さずに行う。index.json を取り直さず、カードも作り直さないため。
   // 新しいタブで開くとき (修飾キー、中クリック) は href のとおりに開く。
   $("view-link").addEventListener("click", (e) => {
     if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;

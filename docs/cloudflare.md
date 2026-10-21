@@ -260,6 +260,10 @@ Worker のコードが作る応答には効かないが、mypub は Worker の�
 `private` にするのは、Access の内側のページを共有キャッシュに置かせないためである。
 出典: <https://www.rfc-editor.org/rfc/rfc9111#section-5.2.2.7>
 
+一覧ページ (assets/index.html) のサムネも、版に固定した `/<slug>/v/<latest>/_page` を読む。
+一覧ページは隠したカードからサムネの iframe を外し、表示に戻すときに作り直す。
+同じ版のサムネを 2 度目に読むときはこのキャッシュから返り、再検証のリクエストも出ない。
+
 ### 仕様の要点
 
 次は 2026-10-14 に上の Headers のページ (dateModified 2026-09-22) で確かめた。
