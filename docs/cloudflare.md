@@ -12,6 +12,7 @@ Worker の作成、Workers Builds、カスタムドメイン、Access、応答�
 | 設定 | 場所 |
 |---|---|
 | Worker の名前 | 記事リポジトリの `cloudflare.config.ts` の `name` |
+| Worker の ID (script tag。`make status` が使う) | 記事リポジトリの `mypub.conf` の `WORKER_ID` (`npx cf workers list` の `id`) |
 | カスタムドメイン | 記事リポジトリの `cloudflare.config.ts` の `domains` |
 | 公開 URL | 記事リポジトリの `mypub.conf` の `BASE_URL` |
 | workers.dev の URL | 記事リポジトリの `cloudflare.config.ts` の `workersDev` (`false` で 404 を返す) |
@@ -187,6 +188,7 @@ npx cf zero-trust access logs access-requests list | jq -c '.[:5][] | {created_a
 
 push ごとのビルドは Workers Builds が行う。
 状態はダッシュボードの Worker の Deployments でも、cf でも見られる。
+記事リポジトリで `make status` を実行すると、`cf builds list` の直近のビルドを作成日時、状態、ブランチ、commit、build の UUID、commit メッセージの表で出す。
 
 ```bash
 npx cf workers list                                   # Worker の ID (id) を調べる

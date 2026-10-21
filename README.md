@@ -73,6 +73,7 @@ push したら Workers Builds が勝手にビルドしてデプロイするか�
 
 ```
 bin/mypub                コマンド本体
+mk/content.mk            記事リポジトリの Makefile が include する target 集 (setup、build、serve、deploy、core、status)
 assets/_mypub/           外枠ページの CSS と JS。build が配信ディレクトリの /_mypub/ にコピーする
 assets/_mypub/open-night.css  共通のダークテーマのトークン。piplupflipper/components からコピー
 assets/_mypub/night-sky/ 一覧ページの夜空背景。piplupflipper/components からコピー (中の README にコピー元の commit)
@@ -86,10 +87,11 @@ docs/                    マシンの準備と Cloudflare 側の設定
 
 ```
 core/                    本体 (このリポジトリ) の submodule
+Makefile                 core/mk/content.mk を include するだけの 3 行
 pages/<slug>/_page.html  公開した元の HTML。画像とかは同じディレクトリに
 pages/<slug>/v/<n>/      版ごとの元の HTML と付属ファイル。pages/<slug>/_page.html は最新版の写し
 pages.json               slug ごとのジャンル、説明、作成日、更新日、非推奨の印 (deprecated。非推奨のときだけ置く) と、版の記録 (latest、seq、versions[])
-mypub.conf               公開 URL (BASE_URL)
+mypub.conf               公開 URL (BASE_URL) と Worker の ID (WORKER_ID)
 build.sh                 Workers Builds のビルドコマンド。jq を用意して core/bin/mypub build dist を呼ぶ
 cloudflare.config.ts     Worker の名前、カスタムドメイン、配信の設定
 wrangler.config.ts       static assets のディレクトリ (dist)
@@ -120,7 +122,27 @@ private のリポジトリを作って、次を置く。
 git submodule add https://github.com/piplupflipper/mypub.git core   # https にする。Workers Builds のビルド環境に ssh 鍵は無い
 echo '{}' > pages.json
 echo 'BASE_URL="https://<カスタムドメイン>"' > mypub.conf           # 末尾の / は付けない
+echo 'WORKER_ID="<Worker の ID>"' >> mypub.conf                     # make status が使う。npx cf workers list の id で、Worker の名前じゃないよ⚠️
 ```
+
+`Makefile` はこの 3 行だけ。中身は本体の `mk/content.mk` にあるから、本体を上げれば target も一緒に育つよ🌱
+
+```make
+-include core/mk/content.mk
+core/mk/content.mk:
+	@echo "core/ が空です。git submodule update --init を実行してください" >&2; exit 1
+```
+
+`make` だけ打つと target の一覧が出る📋
+
+| target | やること |
+|---|---|
+| `make setup` | 新しいマシンの準備。submodule、`mise install`、`npm ci`、`mypub install` を一気に🛠️ |
+| `make build` | `./build.sh` で `dist/` を作る🔧 |
+| `make serve` | `dist/` を `cf dev` で手元に配信👀 `/<slug>/_page` も本番と同じ規則で開ける (`SERVE_PORT=` でポート変更) |
+| `make deploy` | `mypub deploy`。急ぎのときだけ⚡ |
+| `make core` | 本体の版を上げて commit、push⬆️ |
+| `make status` | Workers Builds の直近のビルドを表で📊 (`STATUS_COUNT=` で件数変更) |
 
 `build.sh` はこれ。Workers Builds のビルドイメージには jq が無いので、無ければ取る。
 
@@ -146,15 +168,17 @@ Workers Builds の設定は、ビルドコマンド `./build.sh`、デプロイ�
 
 ## 本体の版を上げる ⬆️
 
-記事リポジトリが記録している本体の commit を進めて commit する。本体を直しても、記事リポジトリ側で上げるまで配信は変わらない。
+本体を直しても、記事リポジトリ側で上げるまで配信は変わらないよ☝️ 記事リポジトリで `make core` を打つだけ✨
 
 ```bash
 cd <記事リポジトリ>
-git submodule update --remote core && git add core && git commit -m "core: <本体の commit>"
-git push
+make core
 ```
 
-手元の `core/` が記事リポジトリの記録と違うと、`mypub` コマンドは止まる。`git submodule update --init` で揃える。
+`core/` を本体の `origin/main` に上げて、`core: <旧>..<新>` って commit を作って push する🚀 本文には間の本体の commit が並ぶよ📝
+記事リポジトリに未 commit の変更とか push してない commit があると止まる🛑 もう最新なら「既に最新です」で何もしない👌
+
+別のマシンで pull した後は、手元の `core/` が記事リポジトリの記録とずれてて `mypub` コマンドが止まる。`git submodule update --init` で揃えてね🔁
 
 ## もっと詳しく 📚
 
