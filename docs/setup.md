@@ -8,16 +8,20 @@ Cloudflare 側の設定は [cloudflare.md](cloudflare.md) にある。
 `mypub` コマンドは git と jq を使う。jq は OS のパッケージで入れておく (例: `sudo apt install jq`)。
 
 本体はこのリポジトリだが、コマンドは記事リポジトリの submodule (`core/`) として置いたものを使う。
-記事リポジトリを `--recurse-submodules` で clone する。
+記事リポジトリを `--recurse-submodules` で clone し、`make setup` を実行する。
 
 ```bash
 ghq get --recurse-submodules git@github.com:<owner>/<記事リポジトリ>.git
 cd ~/ghq/github.com/<owner>/<記事リポジトリ>
-mise trust     # 信頼しないと、このディレクトリで mise の shim (gh, node など) がエラーになる
-mise install   # node が入る
-npm ci         # cf と wrangler が入る。mypub deploy を使わないなら要らない
-core/bin/mypub install
+make setup
 ```
+
+`make setup` は記事リポジトリの `Makefile` が include する本体の `mk/content.mk` にあり、次を順に実行する。
+
+1. `git submodule update --init`: `--recurse-submodules` を付けずに clone していても `core/` を取る。ただし `core/` が空だと `Makefile` が `mk/content.mk` を読めないので、そのときは先に手で `git submodule update --init` を実行する
+2. `mise trust && mise install` (mise があるとき): 信頼しないと、このディレクトリで mise の shim (gh, node など) がエラーになる。`mise install` で node が入る
+3. `npm ci`: cf と wrangler が入る。`make serve`、`make status`、`mypub deploy` に使う
+4. `core/bin/mypub install`
 
 `install` は次の symlink を張る。
 
@@ -31,14 +35,23 @@ submodule として置かずに使うときは、環境変数 `MYPUB_CONTENT_DIR
 
 記事リポジトリは本体の commit を gitlink で固定している。
 本体の main を進めても、記事リポジトリで上げるまで配信もコマンドも変わらない。
+上げるときは記事リポジトリで `make core` を実行する。
 
 ```bash
 cd <記事リポジトリ>
-git submodule update --remote core
-git add core
-git commit -m "core: <本体の commit か変更の要約>"
-git push
+make core
 ```
+
+`make core` は次の順に進む。
+
+1. 記事リポジトリに未 commit の変更が無いことを確かめる
+2. upstream があれば `git pull --rebase` し、push していない commit が無いことを確かめる (`mypub deploy` と同じ検査)
+3. `git submodule update --remote core` で `core/` を本体の `origin/main` に上げる。記事リポジトリが記録している commit と同じなら「既に最新です」と出して終わる
+4. `git add core` して commit する。メッセージの 1 行目は `core: <旧 commit>..<新 commit>` で、本文は `git -C core log --oneline <旧>..<新>` の出力である
+5. upstream があれば push する
+
+`make core` の実行中に `core/mk/content.mk` 自体が書き換わっても問題は無い。
+make は makefile を最初に読み切ってから recipe を実行するからである。
 
 別のマシンで記事リポジトリを pull すると gitlink は進むが、`core/` の作業ツリーは古い commit のまま残る。
 その状態で `mypub` を実行すると「記事リポジトリが記録している本体の commit と core/ の checkout が違います」と出て止まる。
