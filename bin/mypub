@@ -32,10 +32,13 @@ usage: mypub <command> [args]
                                   記事リポジトリの pages/<slug>/ へ置き、commit して push する。中身が変われば版を 1 つ積む
   meta <slug> [--genre <名前>] [--desc <一行説明>]
                                   ジャンルと一行説明を変えて commit、push する。オプションが無ければ今の値を出す
-  ls                              公開済みページの一覧 (更新日 / slug / URL / ジャンル / title)
+  ls [--deprecated]               公開済みページの一覧 (更新日 / slug / URL / ジャンル / title)
+                                  既定は非推奨のページを除く。--deprecated で非推奨のページだけを出す
   versions <slug>                 版の一覧 (新しい版が上。最新の印、日時、title、note、ロールバック元)
   rollback <slug> <n> [--note <理由>]
                                   v<n> と同じ中身の版を新しく積んで最新にし、commit して push する
+  deprecate <slug>                非推奨の印を付けて commit、push する。一覧から外れて墓場 (/?view=graveyard) に移る
+  undeprecate <slug>              非推奨の印を外して commit、push する
   rm <slug>                       ページを削除し、commit して push する。版もすべて消える
   get <slug> [dest] [--version <n>]
                                   公開済みの HTML の場所を出す。dest を渡すと公開したときの形でコピーする
@@ -208,14 +211,26 @@ check_pages() {
 
 # --- 外枠ページと一覧の JSON ---
 
+# 非推奨のページのヘッダーに出す印と、墓場 (一覧ページの非推奨だけの表示) へのリンク。
+# 版に固定した外枠ページには書かず、shell.js が v/index.json を見て同じものを足す。class 名と文言は shell.js と揃える。
+DEPRECATED_MARK='<span class="deprecated-mark">非推奨</span>'
+GRAVEYARD_LINK='<a class="graveyard" href="/?view=graveyard">🪦 墓場</a>'
+
 # 外枠ページを $1 に書く。上部のヘッダーと、元の HTML を読み込む iframe だけを持つ。
 # 見た目と振る舞いは assets/_mypub/ の CSS と JS が持つので、ここは中身の差し込みだけにする。
 # $2 は title (エスケープ前)、$3 は title の後ろに並べるヘッダーの HTML、$4 はヘッダーの下に出すバナーの HTML。
+# $5 が空でなければ非推奨のページとして、ヘッダーを赤くし、非推奨の印と墓場へのリンクを出す。
+# 版に固定した外枠ページは $5 を渡さない (作った後に変わらないようにする。印は shell.js が足す)。
 shell_html() {
-  local out="$1" title meta_html="$3" banner_line=""
+  local out="$1" title meta_html="$3" banner_line="" bar_class="bar" mark_line="" graveyard_line=""
   title="$(html_escape "$2")"
   # バナーが無い外枠ページに空行を残さない。
   [ -n "$4" ] && banner_line="$4"$'\n'
+  if [ -n "${5:-}" ]; then
+    bar_class="bar deprecated"
+    mark_line="$DEPRECATED_MARK"$'\n'
+    graveyard_line="$GRAVEYARD_LINK"$'\n'
+  fi
   cat >"$out" <<EOF
 <!doctype html>
 <html lang="ja">
@@ -228,12 +243,12 @@ shell_html() {
 <script>if (window.top !== window.self) location.replace("./$PAGE_URL" + location.hash);</script>
 </head>
 <body>
-<header class="bar">
+<header class="$bar_class">
 <a class="home" href="/">mypub</a>
 <span class="sep" aria-hidden="true">/</span>
-<span class="title">$title</span>
+$mark_line<span class="title">$title</span>
 $meta_html
-<a class="raw" href="./$PAGE_URL" target="_blank" rel="noopener">元のページ ↗</a>
+$graveyard_line<a class="raw" href="./$PAGE_URL" target="_blank" rel="noopener">元のページ ↗</a>
 </header>
 $banner_line<iframe class="page" title="$title" data-src="./$PAGE_URL"></iframe>
 <noscript><p class="noscript"><a href="./$PAGE_URL">元のページを開く</a></p></noscript>
@@ -245,8 +260,9 @@ EOF
 
 # 最新版の外枠ページ (<out>/<slug>/index.html)。
 # 版が 2 つ以上あれば、更新日の隣に最新の版番号を出し、版の一覧ページへリンクする。
+# $7 が空でなければ非推奨のページ。
 write_shell() {
-  local slug="$1" title="$2" genre updated latest="$5" count="$6" meta_html=""
+  local slug="$1" title="$2" genre updated latest="$5" count="$6" deprecated="$7" meta_html=""
   genre="$(html_escape "$3")"
   updated="$4"
   [ -n "$genre" ] && meta_html="<span class=\"genre\">$genre</span>"$'\n'
@@ -254,7 +270,7 @@ write_shell() {
   if [ "$count" -gt 1 ]; then
     meta_html+=$'\n'"<a class=\"ver\" href=\"./$VERSIONS_DIR/\" title=\"版の一覧\">v$latest</a>"
   fi
-  shell_html "$OUT/$slug/index.html" "$title" "$meta_html" ""
+  shell_html "$OUT/$slug/index.html" "$title" "$meta_html" "" "$deprecated"
 }
 
 # 版に固定した外枠ページ (<out>/<slug>/v/<n>/index.html)。
@@ -274,9 +290,15 @@ write_version_shell() {
 
 # 版の一覧ページ (<out>/<slug>/v/index.html)。pages.json の versions から静的に作る。
 # pages.json は配信されないので、JS で読みに行く形にはしない。
+# $3 が空でなければ非推奨のページとして、外枠ページと同じくヘッダーを赤くし、印と墓場へのリンクを出す。
 write_versions_page() {
-  local slug="$1" title rows
+  local slug="$1" title rows bar_class="bar" mark_line="" graveyard_line=""
   title="$(html_escape "$2")"
+  if [ -n "$3" ]; then
+    bar_class="bar deprecated"
+    mark_line="$DEPRECATED_MARK"$'\n'
+    graveyard_line=$'\n'"$GRAVEYARD_LINK"
+  fi
   # 新しい版が上。日時は「YYYY-MM-DD HH:MM」で出し、datetime に元の値を残す。
   rows="$(pages_read | jq -r --arg s "$slug" '
     .[$s] as $p
@@ -300,12 +322,12 @@ write_versions_page() {
 <link rel="stylesheet" href="/_mypub/shell.css">
 </head>
 <body class="versions">
-<header class="bar">
+<header class="$bar_class">
 <a class="home" href="/">mypub</a>
 <span class="sep" aria-hidden="true">/</span>
-<a class="title" href="../">$title</a>
+$mark_line<a class="title" href="../">$title</a>
 <span class="sep" aria-hidden="true">/</span>
-<span class="here">版の一覧</span>
+<span class="here">版の一覧</span>$graveyard_line
 </header>
 <main class="versions-main">
 <div class="table-wrap">
@@ -325,25 +347,29 @@ EOF
 # 版の一覧の JSON (<out>/<slug>/v/index.json)。shell.js が読み、ヘッダーの版のセレクタを組み立てる。
 # 版の外枠ページに一覧を埋め込まず JSON に分けるのは、publish のたびに全版の外枠ページを書き換えないため。
 # v/ の直下に置くので、版のディレクトリ (v/<n>/) の中身とは混ざらない。
+# 非推奨のページなら deprecated: true を足す。版に固定した外枠ページの shell.js が、これを見てヘッダーに印を足す。
 write_versions_json() {
   local slug="$1"
   # 新しい版が上。キーの順を固定し、ロールバック元 (from) が無い版では from を省く。
+  # 非推奨でないページには deprecated のキーを置かない。
   pages_read | jq --arg s "$slug" '
     .[$s] as $p
     | {latest: $p.latest,
        versions: [$p.versions | sort_by(.n) | reverse | .[]
-         | {n, at, title, note: (.note // ""), from} | del(.from | select(. == null))]}' \
+         | {n, at, title, note: (.note // ""), from} | del(.from | select(. == null))]}
+    + (if $p.deprecated then {deprecated: true} else {} end)' \
     >"$OUT/$slug/$VERSIONS_DIR/index.json"
 }
 
 # 1 つの slug を配信ディレクトリに置く。元の HTML と付属ファイルと全版をコピーし、
 # 外枠ページ (最新版と全版)、版の一覧ページ、版の一覧の JSON を作る。
 write_slug_pages() {
-  local slug="$1" title="$2" p n at vtitle note
+  local slug="$1" title="$2" p deprecated n at vtitle note
   cp -R "$PAGES/$slug" "$OUT/$slug"
   p="$(pages_read | jq -c --arg s "$slug" '.[$s]')"
+  deprecated="$(jq -r 'if .deprecated then "1" else "" end' <<<"$p")"
   write_shell "$slug" "$title" "$(jq -r '.genre' <<<"$p")" "$(jq -r '.updated' <<<"$p")" \
-    "$(jq -r '.latest' <<<"$p")" "$(jq -r '.versions | length' <<<"$p")"
+    "$(jq -r '.latest' <<<"$p")" "$(jq -r '.versions | length' <<<"$p")" "$deprecated"
   # 区切りは US。title と note は 1 行のテキストなので、改行で版を区切れる。
   while IFS="$US" read -r n at vtitle note; do
     if [ ! -d "$OUT/$slug/$VERSIONS_DIR/$n" ]; then
@@ -353,18 +379,20 @@ write_slug_pages() {
     write_version_shell "$slug" "$n" "$at" "$vtitle" "$note"
   done < <(jq -r '.versions[] | [(.n | tostring), .at, .title, (.note // "")] | join("\u001f")' <<<"$p")
   mkdir -p "$OUT/$slug/$VERSIONS_DIR"
-  write_versions_page "$slug" "$title"
+  write_versions_page "$slug" "$title" "$deprecated"
   write_versions_json "$slug"
 }
 
 # 出力は「更新日 US slug US ジャンル US title」で、更新日の新しい順。
 # 区切りはタブでなく US (0x1f) にする。タブは read で空の欄が詰められてしまう。
+# $1 が true なら非推奨のページだけを、false なら非推奨でないページだけを出す。
 US=$'\x1f'
 page_rows() {
-  local slug
+  local deprecated="$1" slug
   list_slugs | while read -r slug; do
-    pages_read | jq -r --arg s "$slug" --arg t "$(page_title "$(page_path "$slug")")" \
-      '[(.[$s].updated // ""), $s, (.[$s].genre // ""), $t] | join("\u001f")'
+    pages_read | jq -r --arg s "$slug" --arg t "$(page_title "$(page_path "$slug")")" --argjson d "$deprecated" '
+      select((.[$s].deprecated // false) == $d)
+      | [(.[$s].updated // ""), $s, (.[$s].genre // ""), $t] | join("\u001f")'
   done | sort -t "$US" -k1,1r -k2,2
 }
 
@@ -380,9 +408,11 @@ build_site() {
     write_slug_pages "$slug" "$title"
   done
   # updated の新しい順、同じ日は slug の順。sort_by は安定なので 2 回に分けて並べる。
+  # 非推奨のページだけに deprecated: true を置く。一覧ページはこれで一覧と墓場に分ける。
   pages_read | jq --argjson t "$titles" '
     [to_entries[] | {slug: .key, title: $t[.key], genre: .value.genre, desc: .value.desc,
-      created: .value.created, updated: .value.updated, latest: .value.latest}]
+      created: .value.created, updated: .value.updated, latest: .value.latest}
+      + (if .value.deprecated then {deprecated: true} else {} end)]
     | sort_by(.slug) | reverse | sort_by(.updated) | reverse' >"$OUT/index.json"
   : >"$OUT/$BUILD_MARK"
 }
@@ -606,12 +636,57 @@ cmd_meta() {
   pages_read | jq --arg s "$slug" '.[$s]'
 }
 
+# 非推奨のページは既定で出さない。--deprecated で非推奨のページだけを出す (墓場と同じ集合)。
 cmd_ls() {
+  local deprecated=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --deprecated)
+        deprecated=true
+        shift
+        ;;
+      -?*) die "不明なオプションです: $1" ;;
+      *) die "usage: mypub ls [--deprecated]" ;;
+    esac
+  done
   require_base_url
   require_jq
-  page_rows | while IFS="$US" read -r date slug genre title; do
+  page_rows "$deprecated" | while IFS="$US" read -r date slug genre title; do
     printf '%s\t%s\t%s\t%s\t%s\n' "$date" "$slug" "$BASE_URL/$slug/" "$genre" "$title"
   done
+}
+
+# 非推奨の印 (pages.json の slug 直下の deprecated: true) を付けるか外す。
+# 印が無いことを非推奨でないとし、false は書かない。updated は変えない (中身は変わっていないので)。
+# 時刻、理由、後継は持たない。publish、rollback、rm は印を見ない。
+set_deprecated() {
+  local verb="$1" slug="$2"
+  valid_slug "$slug" || die "slug が不正です: '$slug'"
+  require_jq
+  require_clean
+  sync_from_remote
+  require_page "$slug"
+  if [ "$verb" = deprecate ]; then
+    pages_update --arg s "$slug" '.[$s].deprecated = true'
+  else
+    pages_update --arg s "$slug" 'del(.[$s].deprecated)'
+  fi
+  if commit_content "$verb: $slug"; then
+    push_to_remote
+  else
+    info "非推奨の印が変わっていないため commit しませんでした"
+  fi
+  pages_read | jq --arg s "$slug" '.[$s]'
+}
+
+cmd_deprecate() {
+  [ $# -eq 1 ] || die "usage: mypub deprecate <slug>"
+  set_deprecated deprecate "$1"
+}
+
+cmd_undeprecate() {
+  [ $# -eq 1 ] || die "usage: mypub undeprecate <slug>"
+  set_deprecated undeprecate "$1"
 }
 
 cmd_rm() {
@@ -814,6 +889,8 @@ main() {
   case "$cmd" in
     publish) cmd_publish "$@" ;;
     meta) cmd_meta "$@" ;;
+    deprecate) cmd_deprecate "$@" ;;
+    undeprecate) cmd_undeprecate "$@" ;;
     ls) cmd_ls "$@" ;;
     versions) cmd_versions "$@" ;;
     rollback) cmd_rollback "$@" ;;

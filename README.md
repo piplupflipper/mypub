@@ -19,6 +19,7 @@ HTML を `mypub publish` すると記事リポジトリに commit されて、Cl
 各ページは上に細いヘッダーが付いた外枠ページになってて、元の HTML はその中の iframe で表示されるよ🪟
 版が 2 つ以上あると、ヘッダーの `v3` みたいな版番号がセレクタになって、そこから版を選んで切り替えられるよ🕰️ 末尾の「版の一覧…」で `/<slug>/v/` に飛べる
 `/<slug>/v/<n>/` はその版に固定した URL で、上に「最新版を開く」のバナーが出る📌
+`mypub deprecate` したページはヘッダーが赤くなって「非推奨」のピルが付くし、一覧から消えて墓場 (`/?view=graveyard`) に引っ越すよ🪦
 
 ## 使い方 🚀
 
@@ -29,10 +30,13 @@ mypub publish report.html my-report --note "例を追加"  # 版に変更理由�
 mypub publish ./dist my-app          # index.html 入りのディレクトリごと📁
 mypub publish report.html --genre howto --desc "一行説明"  # ジャンルと説明を付ける🏷️
 mypub meta my-report --genre explainer  # ジャンルや説明だけ変える✏️
-mypub ls                             # 公開してるページ一覧👀
+mypub ls                             # 公開してるページ一覧👀 非推奨のは出ない
+mypub ls --deprecated                # 非推奨のページだけ一覧に🪦
 mypub versions my-report             # 版の一覧。新しい版が上🕰️
 mypub rollback my-report 1           # v1 と同じ中身の版を新しく積んで最新に⏪
 mypub rollback my-report 1 --note "v2 の図が崩れた"  # 巻き戻しの理由を残す🗒️
+mypub deprecate my-report            # 非推奨にする🪦 一覧から墓場へ
+mypub undeprecate my-report          # 非推奨をやめて一覧に戻す🌱
 mypub rm my-report                   # 削除🗑️ 版も全部消える
 mypub get my-report                  # 公開済み HTML の場所を出す📂
 mypub get my-report ./work           # 公開済みのディレクトリごとコピー📥
@@ -43,7 +47,7 @@ mypub build                          # 配信ディレクトリを記事リポ�
 mypub deploy                         # build して cf で直接デプロイ。急ぎのときだけ⚡
 ```
 
-`publish`、`meta`、`rollback`、`rm` は記事リポジトリを pull → 変更 → commit → push まで全部やってくれる✨
+`publish`、`meta`、`deprecate`、`undeprecate`、`rollback`、`rm` は記事リポジトリを pull → 変更 → commit → push まで全部やってくれる✨
 `--genre` と `--desc` は update のときに省くと前の値をそのまま使うよ👌
 push したら Workers Builds が勝手にビルドしてデプロイするから、待ってればOK☁️
 
@@ -55,6 +59,14 @@ push したら Workers Builds が勝手にビルドしてデプロイするか�
 - ヘッダーの版のセレクタで選ぶと、その版の外枠ページへ移る🔀 選択肢は `/<slug>/v/index.json` から読むので、版の外枠ページは作った後に変わらない
 - 版は消せないよ🙅 slug ごと消すなら `mypub rm`
 
+### 非推奨と墓場 🪦
+
+- 古くなったけど消したくないページは `mypub deprecate` で非推奨にできる。URL はそのまま読めるよ👌
+- 記録は `pages.json` の slug に `"deprecated": true` を 1 行足すだけ。時刻とか理由とか後継は持たない✂️ `undeprecate` するとキーごと消える
+- 一覧ページには出なくなって、見出しの右の「🪦 墓場 (n)」から行ける墓場 (`/?view=graveyard`) に並ぶ。検索とかジャンルの絞り込みは一覧と同じ🔎
+- 外枠ページはヘッダーが赤くなって「非推奨」のピルと墓場へのリンクが付く🚨 版に固定した `/<slug>/v/<n>/` も、`v/index.json` を見て同じ見た目になる (外枠の HTML 自体は変わらない)
+- 更新日は変わらないし、`publish`、`rollback`、`rm` は非推奨かどうかを気にしない。非推奨のまま publish すると非推奨のまま版が積まれるよ
+
 ## 中身 📦
 
 本体 (このリポジトリ)。
@@ -64,7 +76,7 @@ bin/mypub                コマンド本体
 assets/_mypub/           外枠ページの CSS と JS。build が配信ディレクトリの /_mypub/ にコピーする
 assets/_mypub/open-night.css  共通のダークテーマのトークン。piplupflipper/components からコピー
 assets/_mypub/night-sky/ 一覧ページの夜空背景。piplupflipper/components からコピー (中の README にコピー元の commit)
-assets/index.html        一覧ページ。index.json を読んで組み立てる
+assets/index.html        一覧ページ。index.json を読んで組み立てる。?view=graveyard だと非推奨だけの墓場
 assets/_headers          全ページ noindex 🙈 と、版に固定した _page の長期キャッシュ
 skills/mypub-publish/    エージェント用 skill 🤖
 docs/                    マシンの準備と Cloudflare 側の設定
@@ -76,7 +88,7 @@ docs/                    マシンの準備と Cloudflare 側の設定
 core/                    本体 (このリポジトリ) の submodule
 pages/<slug>/_page.html  公開した元の HTML。画像とかは同じディレクトリに
 pages/<slug>/v/<n>/      版ごとの元の HTML と付属ファイル。pages/<slug>/_page.html は最新版の写し
-pages.json               slug ごとのジャンル、説明、作成日、更新日と、版の記録 (latest、seq、versions[])
+pages.json               slug ごとのジャンル、説明、作成日、更新日、非推奨の印 (deprecated。非推奨のときだけ置く) と、版の記録 (latest、seq、versions[])
 mypub.conf               公開 URL (BASE_URL)
 build.sh                 Workers Builds のビルドコマンド。jq を用意して core/bin/mypub build dist を呼ぶ
 cloudflare.config.ts     Worker の名前、カスタムドメイン、配信の設定
@@ -89,13 +101,13 @@ dist/                    build の出力。git には入れない
 `mypub build` が `dist/` に作るもの。
 
 ```
-dist/<slug>/index.html   ヘッダー付きの外枠ページ
+dist/<slug>/index.html   ヘッダー付きの外枠ページ。非推奨ならヘッダーが赤くて「非推奨」の印と墓場へのリンク付き
 dist/<slug>/_page.html   元の HTML (pages/<slug>/ の写し)
 dist/<slug>/v/<n>/       版の元の HTML と、その版に固定した外枠ページ
-dist/<slug>/v/index.html 版の一覧ページ
-dist/<slug>/v/index.json 版の一覧の JSON。ヘッダーの版のセレクタが読む
+dist/<slug>/v/index.html 版の一覧ページ。ヘッダーは最新版の外枠と同じく非推奨を出す
+dist/<slug>/v/index.json 版の一覧の JSON。ヘッダーの版のセレクタが読む。非推奨なら deprecated: true も入って、版に固定した外枠がそれを見てヘッダーを赤くする
 dist/index.html          一覧ページ (assets/index.html の写し)
-dist/index.json          一覧のデータ
+dist/index.json          一覧のデータ。非推奨のページだけ deprecated: true が付く
 dist/_mypub/             外枠ページの CSS と JS (assets/_mypub/ の写し)
 dist/_headers            応答ヘッダー (assets/_headers の写し)
 ```

@@ -44,7 +44,7 @@ mypub publish <dir> [slug] [--genre <名前>] [--desc <一行説明>] [--note <�
 - 標準出力の最後の行が公開 URL。これをユーザーに伝える
 - slug は英小文字、数字、ハイフン。省略するとファイル名（`index.html` なら親ディレクトリ名）から作る
 - 既存の slug を指定すると、`/<slug>/` で配信する最新版を丸ごと置き換え、前の中身は過去版として残る。更新もこのコマンドで行う（詳しくは「版」の節）
-- 新規か更新かを取り違えないよう、先に `mypub ls` で既存の slug を確かめる
+- 新規か更新かを取り違えないよう、先に `mypub ls` と `mypub ls --deprecated` で既存の slug を確かめる（`mypub ls` は非推奨のページを出さない）
 - `--genre` は一覧ページで絞り込みに使うジャンル、`--desc` はカードに出す一行説明。update で省くと前の値を引き継ぐ。既存のジャンルは `mypub ls` の 4 列目で確かめ、なるべく揃える
 - 公開した HTML は記事リポジトリの `pages/<slug>/_page.html` に置かれる。配信では `/<slug>/` がヘッダー付きの外枠ページ（元の HTML を iframe で読み込む）、`/<slug>/_page` が元の HTML になる。ディレクトリごと公開するときは `_page.html` という名前のファイルと `v` という名前のディレクトリを置けない
 - `--note` は版に残す変更理由。版の一覧に出る。更新の理由が分かるときは付ける
@@ -79,16 +79,23 @@ mypub rollback <slug> <n> [--note <理由>]   # v<n> と同じ中身の版を v<
 - commit メッセージは `rollback: <slug> v<n> -> v<新しい番号>` になる
 - 巻き戻しも公開内容を変える操作なので、ユーザーが頼んだときだけ行う。どの版に戻すかは `mypub versions` の出力をユーザーに見せて確かめる
 
-## 一覧と削除
+## 一覧、非推奨、削除
 
 ```bash
-mypub ls                                          # 更新日 / slug / URL / ジャンル / title のタブ区切り
-mypub meta <slug>                                 # ジャンル、一行説明、作成日、更新日、版の記録を JSON で出す
+mypub ls                                          # 更新日 / slug / URL / ジャンル / title のタブ区切り。非推奨のページは出さない
+mypub ls --deprecated                             # 非推奨のページだけを同じ列で出す
+mypub meta <slug>                                 # ジャンル、一行説明、作成日、更新日、非推奨の印、版の記録を JSON で出す
 mypub meta <slug> [--genre <名前>] [--desc <説明>]  # ジャンルや一行説明だけを変えて commit、push する
+mypub deprecate <slug>                            # 非推奨の印を付けて commit、push する
+mypub undeprecate <slug>                          # 非推奨の印を外して commit、push する
 mypub rm <slug>                                   # 全版を含めて削除し、commit、push する
 ```
 
-削除は URL が読めなくなる操作なので、ユーザーが明示的に頼んだときだけ行う。
+- 非推奨は、URL を残したまま一覧から外す印である。`pages.json` の slug 直下に `"deprecated": true` を置き、外すとキーごと消える。時刻、理由、後継は記録しない
+- 非推奨のページは一覧ページに出ず、墓場（`/?view=graveyard`）に並ぶ。外枠ページと版の一覧ページはヘッダーが赤くなり、「非推奨」の印と墓場へのリンクが出る。版に固定した外枠ページ（`/<slug>/v/<n>/`）も、配信の `/<slug>/v/index.json` の `deprecated` を読んで同じ表示になる
+- `deprecate` と `undeprecate` は `updated` を変えない。印が既にその状態なら commit せず、標準エラーに「非推奨の印が変わっていないため commit しませんでした」と出る。どちらも最後に slug の記録を JSON で出す
+- `publish`、`rollback`、`rm` は非推奨の印を見ない。非推奨のページに publish すると、非推奨のまま版が積まれる。一覧に戻すには `mypub undeprecate` を使う
+- 非推奨も削除も公開の見え方を変える操作なので、ユーザーが明示的に頼んだときだけ行う。削除は URL が読めなくなるので、残したいなら非推奨を勧める
 
 ## 公開済みの HTML を取得する
 
@@ -106,7 +113,7 @@ mypub cat <slug> [--version <n>]          # 最新を pull し、元の HTML を
 - 「前に公開したページを直して」と頼まれたら、`mypub get <slug>` で場所を得て Read で読み、直した HTML を `mypub publish <file> <slug>` で同じ slug に出す
 - 画像などを含むページは `mypub get <slug> <dest>` でディレクトリごと取り出し、直してから `mypub publish <dest> <slug>` で出す
 - 過去の版を元に直すときは `mypub versions <slug>` で版番号を確かめ、`--version <n>` で取り出す。直さずにそのまま戻すだけなら `mypub rollback` を使う
-- slug が分からないときは `mypub ls` で title から探す
+- slug が分からないときは `mypub ls` で title から探す。見つからなければ `mypub ls --deprecated` も見る
 - 記事リポジトリに未 commit の変更があると pull せず、手元の内容を返す。その旨が標準エラーに出るので、報告に含める
 
 ## 反映の確認

@@ -8,6 +8,7 @@
 <!--
   一覧ページ。中身は bin/mypub が書き出す index.json から JS で組み立てる。
   このファイル自体は bin/mypub が書き換えない。
+  既定は非推奨 (index.json の deprecated: true) でないページの一覧で、?view=graveyard では非推奨のページだけを出す (墓場)。
   配色は _mypub/open-night.css のトークン、背景は _mypub/night-sky/ の夜空。どちらもダーク専用。
 -->
 <link rel="stylesheet" href="/_mypub/open-night.css">
@@ -17,6 +18,7 @@
   --fg: var(--color-text); --bg: var(--color-page-bg); --card: var(--color-bg); --muted: var(--color-text-dim);
   --line: var(--color-border); --link: var(--color-accent-strong); --pill: var(--color-bg-alt); --thumb: var(--color-bg-sunken);
   --focus: var(--color-accent);
+  --danger: var(--color-danger); --danger-ink: var(--color-accent-ink);
 }
 body { padding: 24px 16px 48px; color: var(--fg); font: 15px/1.6 system-ui, sans-serif; }
 /* 夜空 (.night-sky、z-index 0 の fixed 要素) より手前に出す。 */
@@ -24,6 +26,12 @@ main { position: relative; z-index: 1; max-width: 1100px; margin: 0 auto; }
 h1 { font-size: 20px; margin: 0; }
 .head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; }
 .count { color: var(--muted); font-size: 13px; }
+/* 一覧と墓場を行き来するリンク。見出し行の右端に置く。 */
+.view-link { margin-left: auto; color: var(--link); font-size: 13px; text-decoration: none; white-space: nowrap; }
+.view-link:hover { text-decoration: underline; }
+/* 墓場の印。見出しの脇と、墓場のカードに出す。外枠ページのヘッダーの「非推奨」と同じ色にする。 */
+.view-mark, .deprecated-mark { padding: 0 8px; border-radius: 999px; background: var(--danger); color: var(--danger-ink); font-weight: 700; }
+.view-mark { font-size: 13px; }
 .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .controls input, .controls select {
   font: inherit; color: inherit; background: var(--card);
@@ -60,7 +68,10 @@ h1 { font-size: 20px; margin: 0; }
 </head>
 <body>
 <main>
-<div class="head"><h1>mypub</h1><span class="count" id="count"></span></div>
+<div class="head">
+  <h1>mypub</h1><span class="view-mark" id="view-mark" hidden>🪦 墓場</span><span class="count" id="count"></span>
+  <a class="view-link" id="view-link" href="?view=graveyard">🪦 墓場</a>
+</div>
 <div class="controls">
   <input type="search" id="q" placeholder="title・slug・ジャンル・説明で検索" aria-label="検索">
   <select id="sort" aria-label="並び順">
@@ -87,17 +98,22 @@ h1 { font-size: 20px; margin: 0; }
   };
 
   // 絞り込みの状態は URL のクエリに持たせる。再読み込みや戻るで復元できる。
+  // view は一覧 (list) か墓場 (graveyard)。墓場は非推奨のページだけを、一覧はそれ以外を出す。
+  const GRAVEYARD = "graveyard";
   const params = new URLSearchParams(location.search);
   const state = {
+    view: params.get("view") === GRAVEYARD ? GRAVEYARD : "list",
     q: params.get("q") || "",
     genre: params.has("genre") ? (params.get("genre") || NONE) : ALL,
     sort: params.get("sort") || "updated-desc",
   };
   let pages = [];
+  let loaded = false;
   const cards = new Map();
 
   const saveState = () => {
     const p = new URLSearchParams();
+    if (state.view === GRAVEYARD) p.set("view", GRAVEYARD);
     if (state.q) p.set("q", state.q);
     if (state.genre !== ALL) p.set("genre", state.genre === NONE ? "" : state.genre);
     if (state.sort !== "updated-desc") p.set("sort", state.sort);
@@ -118,9 +134,12 @@ h1 { font-size: 20px; margin: 0; }
     return terms.every((t) => hay.includes(t));
   };
 
-  const renderGenres = () => {
+  // 今の view に出すページ。ジャンルの件数も、この集合で数える。
+  const inView = (p) => (state.view === GRAVEYARD) === p.deprecated;
+
+  const renderGenres = (viewPages) => {
     const counts = new Map();
-    for (const p of pages) {
+    for (const p of viewPages) {
       const g = p.genre || NONE;
       counts.set(g, (counts.get(g) || 0) + 1);
     }
@@ -134,7 +153,7 @@ h1 { font-size: 20px; margin: 0; }
       return b;
     };
     $("genres").replaceChildren(
-      button(ALL, "すべて", pages.length),
+      button(ALL, "すべて", viewPages.length),
       ...names.map((g) => button(g, g === NONE ? "未分類" : g, counts.get(g))),
     );
   };
@@ -147,6 +166,7 @@ h1 { font-size: 20px; margin: 0; }
     thumb.inert = true;
     thumb.setAttribute("aria-hidden", "true");
     const info = [];
+    if (p.deprecated) info.push(el("span", { className: "deprecated-mark", textContent: "非推奨" }));
     if (p.genre) info.push(el("span", { className: "genre", textContent: p.genre }));
     info.push(el("time", { dateTime: p.updated, textContent: `更新 ${p.updated}` }));
     if (p.created !== p.updated) info.push(el("time", { dateTime: p.created, textContent: `作成 ${p.created}` }));
@@ -159,17 +179,32 @@ h1 { font-size: 20px; margin: 0; }
     ]);
   };
 
+  // 見出し行。墓場では h1 の脇に印を出し、右端のリンクを一覧へ戻るものにする。
+  // 墓場の件数は index.json を読めてから出す。
+  const renderView = () => {
+    const graveyard = state.view === GRAVEYARD;
+    const buried = pages.filter((p) => p.deprecated).length;
+    $("view-mark").hidden = !graveyard;
+    const link = $("view-link");
+    link.textContent = graveyard ? "← 一覧へ" : `🪦 墓場${loaded ? ` (${buried})` : ""}`;
+    link.href = graveyard ? location.pathname : `?view=${GRAVEYARD}`;
+    document.title = graveyard ? "墓場 · mypub" : "mypub";
+  };
+
   const render = () => {
-    renderGenres();
+    const viewPages = pages.filter(inView);
+    renderView();
+    renderGenres(viewPages);
     const terms = state.q.toLowerCase().split(/\s+/).filter(Boolean);
-    const shown = pages
+    const shown = viewPages
       .filter((p) => state.genre === ALL || (p.genre || NONE) === state.genre)
       .filter((p) => matches(p, terms))
       .sort(sorters[state.sort] || sorters["updated-desc"]);
-    $("count").textContent = shown.length === pages.length ? `${pages.length} 件` : `${shown.length} / ${pages.length} 件`;
+    $("count").textContent = shown.length === viewPages.length ? `${viewPages.length} 件` : `${shown.length} / ${viewPages.length} 件`;
     const status = $("status");
     status.hidden = shown.length > 0;
-    status.textContent = pages.length === 0 ? "公開済みのページはありません。" : "条件に合うページはありません。";
+    if (viewPages.length > 0) status.textContent = "条件に合うページはありません。";
+    else status.textContent = state.view === GRAVEYARD ? "非推奨のページはありません。" : "公開済みのページはありません。";
     // カードは最初に 1 度だけ作り、絞り込みは hidden で切り替える。
     // iframe は DOM から外すと読み込み直しになるので、並び順が変わったカードだけを動かす。
     // moveBefore (状態を保ったまま動かす) が無いブラウザでは、動かしたサムネだけ読み込み直しになる。
@@ -187,11 +222,20 @@ h1 { font-size: 20px; margin: 0; }
     saveState();
   };
 
+  renderView();
   $("q").value = state.q;
   $("sort").value = sorters[state.sort] ? state.sort : "updated-desc";
   state.sort = $("sort").value;
   $("q").addEventListener("input", (e) => { state.q = e.target.value; render(); });
   $("sort").addEventListener("change", (e) => { state.sort = e.target.value; render(); });
+  // 一覧と墓場の切り替えは読み込み直さずに行う。サムネの iframe を読み込み直さないため。
+  // 新しいタブで開くとき (修飾キー、中クリック) は href のとおりに開く。
+  $("view-link").addEventListener("click", (e) => {
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    state.view = state.view === GRAVEYARD ? "list" : GRAVEYARD;
+    render();
+  });
 
   fetch("./index.json", { cache: "no-cache" })
     .then((r) => {
@@ -199,8 +243,9 @@ h1 { font-size: 20px; margin: 0; }
       return r.json();
     })
     .then((json) => {
-      pages = json.map((p) => ({ ...p, genre: p.genre || "", desc: p.desc || "" }));
+      pages = json.map((p) => ({ ...p, genre: p.genre || "", desc: p.desc || "", deprecated: p.deprecated === true }));
       for (const p of pages) cards.set(p.slug, card(p));
+      loaded = true;
       render();
     })
     .catch((err) => {

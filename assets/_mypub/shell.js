@@ -64,54 +64,80 @@
 
   frame.src = frame.dataset.src + location.hash;
 
+  const slug = location.pathname.split("/")[1];
+  const pinned = location.pathname.match(/^\/[^/]+\/v\/([0-9]+)\//);
+  const bar = document.querySelector(".bar");
+
+  // 非推奨のページなら、ヘッダーを赤くし、非推奨の印と墓場へのリンクを足す。
+  // 最新版の外枠は bin/mypub が静的に書くので、ここで足すのは版に固定した外枠だけ。
+  // 版に固定した外枠ページは作った後に変わらないので、非推奨かどうかは v/index.json から読む。
+  // class 名と文言は bin/mypub の DEPRECATED_MARK、GRAVEYARD_LINK と揃える。
+  const markDeprecated = () => {
+    if (!bar || bar.classList.contains("deprecated")) return;
+    bar.classList.add("deprecated");
+    const mark = document.createElement("span");
+    mark.className = "deprecated-mark";
+    mark.textContent = "非推奨";
+    bar.insertBefore(mark, bar.querySelector(".title"));
+    const graveyard = document.createElement("a");
+    graveyard.className = "graveyard";
+    graveyard.href = "/?view=graveyard";
+    graveyard.textContent = "🪦 墓場";
+    bar.insertBefore(graveyard, bar.querySelector(".raw"));
+  };
+
   // ヘッダーの版番号 (.ver) を、版を選んで外枠ごと移るセレクタに置き換える。
   // 版の一覧は外枠ページに埋め込まず、/<slug>/v/index.json から読む。埋め込むと publish のたびに全版の外枠ページが書き換わる。
   // 読めなかったときと JS が無いときは、版の一覧ページへの静的なリンクがそのまま残る。
   const verLink = document.querySelector(".bar .ver");
-  if (!verLink) return; // 版が 1 つの slug の最新版の外枠には版番号が無い
-  const slug = location.pathname.split("/")[1];
-  const pinned = location.pathname.match(/^\/[^/]+\/v\/([0-9]+)\//);
   const shellUrl = (value, latest) => {
     if (value === "list") return `/${slug}/v/`;
     return Number(value) === latest ? `/${slug}/` : `/${slug}/v/${value}/`;
   };
+  const mountVersionSelect = ({ latest, versions }) => {
+    if (!verLink) return; // 版が 1 つの slug の最新版の外枠には版番号が無い
+    if (!Array.isArray(versions) || versions.length < 2) return;
+    const current = pinned ? Number(pinned[1]) : latest;
+    if (!versions.some((v) => v.n === current)) return;
 
+    const select = document.createElement("select");
+    select.className = "ver";
+    select.title = "版を切り替える";
+    select.setAttribute("aria-label", "版");
+    // note は publish したときの入力なので、textContent で入れる。
+    for (const v of versions) {
+      const parts = [`v${v.n}`, String(v.at).slice(0, 10)];
+      if (v.n === latest) parts.push("最新");
+      if (v.note) parts.push(v.note);
+      const opt = document.createElement("option");
+      opt.value = String(v.n);
+      opt.textContent = parts.join(" · ");
+      select.append(opt);
+    }
+    const list = document.createElement("option");
+    list.value = "list";
+    list.textContent = "版の一覧…";
+    select.append(list);
+
+    const reset = () => {
+      select.value = String(current);
+    };
+    reset();
+    select.addEventListener("change", () => {
+      location.href = shellUrl(select.value, latest) + location.hash;
+    });
+    // 戻るボタンで bfcache から戻ったとき、選んだ版のままにならないようにする。
+    window.addEventListener("pageshow", reset);
+    verLink.replaceWith(select);
+  };
+
+  // 版のセレクタも非推奨の印も要らない外枠 (版が 1 つの slug の最新版) では読まない。
+  if (!verLink && !pinned) return;
   fetch(`/${slug}/v/index.json`, { cache: "no-cache" })
     .then((res) => (res.ok ? res.json() : Promise.reject(new Error(res.statusText))))
-    .then(({ latest, versions }) => {
-      if (!Array.isArray(versions) || versions.length < 2) return;
-      const current = pinned ? Number(pinned[1]) : latest;
-      if (!versions.some((v) => v.n === current)) return;
-
-      const select = document.createElement("select");
-      select.className = "ver";
-      select.title = "版を切り替える";
-      select.setAttribute("aria-label", "版");
-      // note は publish したときの入力なので、textContent で入れる。
-      for (const v of versions) {
-        const parts = [`v${v.n}`, String(v.at).slice(0, 10)];
-        if (v.n === latest) parts.push("最新");
-        if (v.note) parts.push(v.note);
-        const opt = document.createElement("option");
-        opt.value = String(v.n);
-        opt.textContent = parts.join(" · ");
-        select.append(opt);
-      }
-      const list = document.createElement("option");
-      list.value = "list";
-      list.textContent = "版の一覧…";
-      select.append(list);
-
-      const reset = () => {
-        select.value = String(current);
-      };
-      reset();
-      select.addEventListener("change", () => {
-        location.href = shellUrl(select.value, latest) + location.hash;
-      });
-      // 戻るボタンで bfcache から戻ったとき、選んだ版のままにならないようにする。
-      window.addEventListener("pageshow", reset);
-      verLink.replaceWith(select);
+    .then((data) => {
+      if (pinned && data.deprecated === true) markDeprecated();
+      mountVersionSelect(data);
     })
     .catch(() => {});
 })();

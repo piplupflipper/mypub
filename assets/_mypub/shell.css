@@ -35,6 +35,30 @@ body {
   min-width: 0;
   white-space: nowrap;
 }
+/* 非推奨のページのヘッダー。開いた瞬間に分かるよう、背景に danger を混ぜて赤くし、下の線も danger にする。
+   背景は暗いページの地に混ぜるので、文字 (--bar-fg) の明るさとの差は保たれる。
+   普段のヘッダーは body の背景をそのまま見せるが、ここでは赤い背景をヘッダーだけに敷く。
+   最新版の外枠と版の一覧は bin/mypub が、版に固定した外枠は shell.js が deprecated のクラスを付ける。 */
+.bar.deprecated {
+  --bar-bg: color-mix(in srgb, var(--color-danger) 34%, var(--color-page-bg));
+  --bar-line: var(--color-danger);
+  --bar-pill: color-mix(in srgb, var(--color-danger) 18%, var(--color-page-bg));
+  background: var(--bar-bg);
+}
+.bar .deprecated-mark {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--color-danger);
+  color: var(--color-accent-ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+/* 墓場 (一覧ページの非推奨だけの表示) へのリンク。版の一覧ページでは右端に寄せる。 */
+.bar .graveyard {
+  flex: none;
+  margin-left: auto;
+}
 .bar a {
   color: var(--bar-link);
   text-decoration: none;
@@ -180,11 +204,13 @@ body.versions .bar .title {
   font-size: 11px;
 }
 /* 狭い画面では、無くても読めるものから隠す。版番号は版の一覧への入口なので残す。
+   非推奨の印は残し、墓場へのリンクは隠す (墓場には一覧ページの見出し行から行ける)。
    バナーの note は隠し、「固定した URL」の文と「最新版を開く」を残す。
    版の一覧の title 列とロールバック元の列は隠す。title はヘッダーと各版の外枠ページで、ロールバック元は note の「rollback to v<n>」で分かる。 */
 @media (max-width: 560px) {
   .bar time,
   .bar .genre,
+  .bar .graveyard,
   .pinned .note,
   .versions-table .t,
   .versions-table .from {
