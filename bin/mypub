@@ -32,10 +32,13 @@ usage: mypub <command> [args]
                                   記事リポジトリの pages/<slug>/ へ置き、commit して push する。中身が変われば版を 1 つ積む
   meta <slug> [--genre <名前>] [--desc <一行説明>]
                                   ジャンルと一行説明を変えて commit、push する。オプションが無ければ今の値を出す
-  ls                              公開済みページの一覧 (更新日 / slug / URL / ジャンル / title)
+  ls [--deprecated]               公開済みページの一覧 (更新日 / slug / URL / ジャンル / title)
+                                  既定は非推奨のページを除く。--deprecated で非推奨のページだけを出す
   versions <slug>                 版の一覧 (新しい版が上。最新の印、日時、title、note、ロールバック元)
   rollback <slug> <n> [--note <理由>]
                                   v<n> と同じ中身の版を新しく積んで最新にし、commit して push する
+  deprecate <slug>                非推奨の印を付けて commit、push する。一覧から外れて墓場 (/?view=graveyard) に移る
+  undeprecate <slug>              非推奨の印を外して commit、push する
   rm <slug>                       ページを削除し、commit して push する。版もすべて消える
   get <slug> [dest] [--version <n>]
                                   公開済みの HTML の場所を出す。dest を渡すと公開したときの形でコピーする
@@ -359,12 +362,14 @@ write_slug_pages() {
 
 # 出力は「更新日 US slug US ジャンル US title」で、更新日の新しい順。
 # 区切りはタブでなく US (0x1f) にする。タブは read で空の欄が詰められてしまう。
+# $1 が true なら非推奨のページだけを、false なら非推奨でないページだけを出す。
 US=$'\x1f'
 page_rows() {
-  local slug
+  local deprecated="$1" slug
   list_slugs | while read -r slug; do
-    pages_read | jq -r --arg s "$slug" --arg t "$(page_title "$(page_path "$slug")")" \
-      '[(.[$s].updated // ""), $s, (.[$s].genre // ""), $t] | join("\u001f")'
+    pages_read | jq -r --arg s "$slug" --arg t "$(page_title "$(page_path "$slug")")" --argjson d "$deprecated" '
+      select((.[$s].deprecated // false) == $d)
+      | [(.[$s].updated // ""), $s, (.[$s].genre // ""), $t] | join("\u001f")'
   done | sort -t "$US" -k1,1r -k2,2
 }
 
@@ -606,12 +611,57 @@ cmd_meta() {
   pages_read | jq --arg s "$slug" '.[$s]'
 }
 
+# 非推奨のページは既定で出さない。--deprecated で非推奨のページだけを出す (墓場と同じ集合)。
 cmd_ls() {
+  local deprecated=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --deprecated)
+        deprecated=true
+        shift
+        ;;
+      -?*) die "不明なオプションです: $1" ;;
+      *) die "usage: mypub ls [--deprecated]" ;;
+    esac
+  done
   require_base_url
   require_jq
-  page_rows | while IFS="$US" read -r date slug genre title; do
+  page_rows "$deprecated" | while IFS="$US" read -r date slug genre title; do
     printf '%s\t%s\t%s\t%s\t%s\n' "$date" "$slug" "$BASE_URL/$slug/" "$genre" "$title"
   done
+}
+
+# 非推奨の印 (pages.json の slug 直下の deprecated: true) を付けるか外す。
+# 印が無いことを非推奨でないとし、false は書かない。updated は変えない (中身は変わっていないので)。
+# 時刻、理由、後継は持たない。publish、rollback、rm は印を見ない。
+set_deprecated() {
+  local verb="$1" slug="$2"
+  valid_slug "$slug" || die "slug が不正です: '$slug'"
+  require_jq
+  require_clean
+  sync_from_remote
+  require_page "$slug"
+  if [ "$verb" = deprecate ]; then
+    pages_update --arg s "$slug" '.[$s].deprecated = true'
+  else
+    pages_update --arg s "$slug" 'del(.[$s].deprecated)'
+  fi
+  if commit_content "$verb: $slug"; then
+    push_to_remote
+  else
+    info "非推奨の印が変わっていないため commit しませんでした"
+  fi
+  pages_read | jq --arg s "$slug" '.[$s]'
+}
+
+cmd_deprecate() {
+  [ $# -eq 1 ] || die "usage: mypub deprecate <slug>"
+  set_deprecated deprecate "$1"
+}
+
+cmd_undeprecate() {
+  [ $# -eq 1 ] || die "usage: mypub undeprecate <slug>"
+  set_deprecated undeprecate "$1"
 }
 
 cmd_rm() {
@@ -814,6 +864,8 @@ main() {
   case "$cmd" in
     publish) cmd_publish "$@" ;;
     meta) cmd_meta "$@" ;;
+    deprecate) cmd_deprecate "$@" ;;
+    undeprecate) cmd_undeprecate "$@" ;;
     ls) cmd_ls "$@" ;;
     versions) cmd_versions "$@" ;;
     rollback) cmd_rollback "$@" ;;
