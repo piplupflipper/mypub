@@ -11,6 +11,7 @@
   既定は非推奨 (index.json の deprecated: true) でないページの一覧で、?view=graveyard では非推奨のページだけを出す (墓場)。
   サムネの iframe は表示するカードにだけ置き、版に固定した /<slug>/v/<latest>/_page (_headers で immutable) を読む。隠すカードからは外す。
   配色は _mypub/open-night.css のトークン、背景は _mypub/night-sky/ の夜空。どちらもダーク専用。
+  夜空はタッチが主な入力の端末では動かさない。
 -->
 <link rel="stylesheet" href="/_mypub/open-night.css">
 <link rel="stylesheet" href="/_mypub/night-sky/night-sky.css">
@@ -269,7 +270,9 @@ h1 { font-size: 20px; margin: 0; }
 </script>
 <script type="module">
   import { mountNightSkyBackground } from "/_mypub/night-sky/night-sky.js";
-  mountNightSkyBackground(document.body);
+  // タッチが主な入力の端末 (タブレット、スマホ) では雲を動かさず、最初の 1 フレームの静止画にする (issue #11)。
+  // 夜空は毎フレーム全画素にノイズを計算するので、タブレットでは一覧ページが重くなる。
+  mountNightSkyBackground(document.body, { speed: matchMedia("(pointer: coarse)").matches ? 0 : 1 });
 </script>
 </body>
 </html>
